@@ -184,8 +184,6 @@ router.post('/login', async (req: Request, res: Response) => {
 
 // POST /auth/logout
 router.post('/logout', requireAuth, async (req: AuthRequest, res: Response) => {
-  const authHeader = req.headers.authorization ?? '';
-  // Best-effort: delete all refresh tokens for this user
   await pool.query('DELETE FROM refresh_tokens WHERE user_id = $1', [req.userId]);
   ok(res, null);
 });
@@ -322,19 +320,19 @@ router.post('/reset-password', async (req: Request, res: Response) => {
 });
 
 // GET /health
-router.get('/health', (_req, res) => res.json({ status: 'ok' }));
+router.get('/health', (_req: Request, res: Response) => res.json({ status: 'ok' }));
 
 function mapUser(row: Record<string, unknown>) {
   return {
-    id: row.id,
-    firstName: row.first_name,
-    lastName: row.last_name,
-    email: row.email,
-    phone: row.phone,
-    role: row.role,
-    profileImage: row.profile_image ?? null,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
+    id: row.id as string,
+    firstName: row.first_name as string,
+    lastName: row.last_name as string,
+    email: row.email as string,
+    phone: row.phone as string,
+    role: row.role as string,
+    profileImage: (row.profile_image ?? null) as string | null,
+    createdAt: row.created_at as string,
+    updatedAt: row.updated_at as string,
   };
 }
 
