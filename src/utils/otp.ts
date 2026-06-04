@@ -7,24 +7,21 @@ function getClient() {
   return twilio(sid, token);
 }
 
-export function generateOtp(): string {
-  return Math.floor(100000 + Math.random() * 900000).toString();
+function getServiceSid() {
+  const sid = process.env.TWILIO_VERIFY_SERVICE_SID;
+  if (!sid) throw new Error('TWILIO_VERIFY_SERVICE_SID not configured');
+  return sid;
 }
 
-export function otpExpiresAt(): Date {
-  const d = new Date();
-  d.setMinutes(d.getMinutes() + 10);
-  return d;
+export async function sendOtp(phone: string): Promise<void> {
+  await getClient().verify.v2
+    .services(getServiceSid())
+    .verifications.create({ to: phone, channel: 'sms' });
 }
 
-export async function sendOtp(phone: string, otp: string, purpose: string): Promise<void> {
-  const message = purpose === 'password_reset'
-    ? `Your Empire Deliveries password reset code is: ${otp}. Valid for 10 minutes.`
-    : `Your Empire Deliveries verification code is: ${otp}. Valid for 10 minutes.`;
-
-  await getClient().messages.create({
-    body: message,
-    from: process.env.TWILIO_PHONE_NUMBER!,
-    to: phone,
-  });
+export async function checkOtp(phone: string, code: string): Promise<boolean> {
+  const result = await getClient().verify.v2
+    .services(getServiceSid())
+    .verificationChecks.create({ to: phone, code });
+  return result.status === 'approved';
 }

@@ -1,10 +1,9 @@
 import { Router, Request, Response } from 'express';
 import bcrypt from 'bcryptjs';
-import { v4 as uuidv4 } from 'uuid';
 import { pool } from '../db';
 import { requireAuth, AuthRequest } from '../middleware/auth';
 import { signAccessToken, signRefreshToken, verifyAccessToken, refreshTokenExpiresAt } from '../utils/jwt';
-import { generateOtp, otpExpiresAt, sendOtp } from '../utils/otp';
+import { sendOtp, checkOtp } from '../utils/otp';
 import { ok, fail } from '../utils/response';
 
 const router = Router();
@@ -42,15 +41,7 @@ router.post('/register', async (req: Request, res: Response) => {
       [firstName.trim(), lastName.trim(), email.toLowerCase().trim(), phone, passwordHash]
     );
 
-    // Invalidate old OTPs and create a new one
-    await client.query('UPDATE otps SET used = true WHERE phone = $1 AND purpose = $2', [phone, 'registration']);
-    const otp = generateOtp();
-    await client.query(
-      'INSERT INTO otps (phone, otp, purpose, expires_at) VALUES ($1, $2, $3, $4)',
-      [phone, otp, 'registration', otpExpiresAt()]
-    );
-
-    await sendOtp(phone, otp, 'registration');
+    await sendOtp(phone);
     ok(res, { message: 'Account created. Please verify your phone number.' }, undefined, 201);
   } finally {
     client.release();
@@ -67,23 +58,11 @@ router.post('/verify-otp', async (req: Request, res: Response) => {
 
   const client = await pool.connect();
   try {
-    const otpRow = await client.query(
-      `SELECT id, expires_at FROM otps
-       WHERE phone = $1 AND otp = $2 AND purpose = $3 AND used = false
-       ORDER BY created_at DESC LIMIT 1`,
-      [phone, otp, purpose]
-    );
-
-    if (!otpRow.rows.length) {
+    const approved = await checkOtp(phone, otp);
+    if (!approved) {
       fail(res, 400, 'OTP_INVALID', 'Invalid or expired code. Please try again.');
       return;
     }
-    if (new Date(otpRow.rows[0].expires_at) < new Date()) {
-      fail(res, 400, 'OTP_EXPIRED', 'This code has expired. Please request a new one.');
-      return;
-    }
-
-    await client.query('UPDATE otps SET used = true WHERE id = $1', [otpRow.rows[0].id]);
 
     const userRow = await client.query(
       `UPDATE users SET is_verified = true, updated_at = NOW()
@@ -121,14 +100,7 @@ router.post('/resend-otp', async (req: Request, res: Response) => {
       return;
     }
 
-    await client.query('UPDATE otps SET used = true WHERE phone = $1', [phone]);
-    const otp = generateOtp();
-    await client.query(
-      'INSERT INTO otps (phone, otp, purpose, expires_at) VALUES ($1, $2, $3, $4)',
-      [phone, otp, 'registration', otpExpiresAt()]
-    );
-
-    await sendOtp(phone, otp, 'registration');
+    await sendOtp(phone);
     ok(res, { message: 'A new verification code has been sent.' });
   } finally {
     client.release();
@@ -261,14 +233,7 @@ router.post('/forgot-password', async (req: Request, res: Response) => {
     }
 
     const { id, phone } = userRow.rows[0];
-    await client.query('UPDATE otps SET used = true WHERE phone = $1 AND purpose = $2', [phone, 'password_reset']);
-    const otp = generateOtp();
-    await client.query(
-      'INSERT INTO otps (phone, otp, purpose, expires_at) VALUES ($1, $2, $3, $4)',
-      [phone, otp, 'password_reset', otpExpiresAt()]
-    );
-
-    await sendOtp(phone, otp, 'password_reset');
+    await sendOtp(phone);
     ok(res, { message: 'If an account exists, a reset code has been sent to your phone.' });
   } finally {
     client.release();
@@ -287,36 +252,26 @@ router.post('/reset-password', async (req: Request, res: Response) => {
     return;
   }
 
-  const client = await pool.connect();
-  try {
-    // token here is the OTP; phone is embedded as "phone:otp" encoded by the app
-    // The mobile app sends the OTP from the verify-otp flow for password_reset purpose
-    const [phone, otp] = token.split(':');
-    if (!phone || !otp) {
-      fail(res, 400, 'TOKEN_INVALID', 'Invalid reset token.');
-      return;
-    }
-
-    const otpRow = await client.query(
-      `SELECT id FROM otps WHERE phone = $1 AND otp = $2 AND purpose = 'password_reset' AND used = false AND expires_at > NOW()`,
-      [phone, otp]
-    );
-    if (!otpRow.rows.length) {
-      fail(res, 400, 'TOKEN_INVALID', 'Invalid or expired reset code.');
-      return;
-    }
-
-    await client.query('UPDATE otps SET used = true WHERE id = $1', [otpRow.rows[0].id]);
-    const passwordHash = await bcrypt.hash(newPassword, 12);
-    await client.query(
-      'UPDATE users SET password_hash = $1, updated_at = NOW() WHERE phone = $2',
-      [passwordHash, phone]
-    );
-
-    ok(res, { message: 'Password updated successfully.' });
-  } finally {
-    client.release();
+  // token is "phone:otp" — the mobile OTP screen passes both
+  const [phone, otp] = token.split(':');
+  if (!phone || !otp) {
+    fail(res, 400, 'TOKEN_INVALID', 'Invalid reset token.');
+    return;
   }
+
+  const approved = await checkOtp(phone, otp);
+  if (!approved) {
+    fail(res, 400, 'TOKEN_INVALID', 'Invalid or expired reset code.');
+    return;
+  }
+
+  const passwordHash = await bcrypt.hash(newPassword, 12);
+  await pool.query(
+    'UPDATE users SET password_hash = $1, updated_at = NOW() WHERE phone = $2',
+    [passwordHash, phone]
+  );
+
+  ok(res, { message: 'Password updated successfully.' });
 });
 
 // GET /health
