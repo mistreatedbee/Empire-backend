@@ -20,8 +20,16 @@ export async function sendOtp(phone: string): Promise<void> {
 }
 
 export async function checkOtp(phone: string, code: string): Promise<boolean> {
-  const result = await getClient().verify.v2
-    .services(getServiceSid())
-    .verificationChecks.create({ to: phone, code });
-  return result.status === 'approved';
+  try {
+    const result = await getClient().verify.v2
+      .services(getServiceSid())
+      .verificationChecks.create({ to: phone, code });
+    return result.status === 'approved';
+  } catch (err: unknown) {
+    // Twilio 404 means no pending verification for this phone — treat as invalid code
+    if (typeof err === 'object' && err !== null && 'status' in err && (err as { status: number }).status === 404) {
+      return false;
+    }
+    throw err;
+  }
 }
