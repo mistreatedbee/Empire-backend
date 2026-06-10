@@ -42,9 +42,123 @@ CREATE TABLE IF NOT EXISTS password_reset_tokens (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS categories (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name VARCHAR(100) NOT NULL,
+  icon VARCHAR(100),
+  slug VARCHAR(100) UNIQUE NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS restaurants (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name VARCHAR(200) NOT NULL,
+  slug VARCHAR(200) UNIQUE NOT NULL,
+  description TEXT,
+  cover_image VARCHAR(500),
+  logo VARCHAR(500),
+  category_id UUID REFERENCES categories(id),
+  rating NUMERIC(3,2) NOT NULL DEFAULT 0,
+  review_count INT NOT NULL DEFAULT 0,
+  delivery_time_min INT NOT NULL DEFAULT 20,
+  delivery_time_max INT NOT NULL DEFAULT 40,
+  delivery_fee NUMERIC(10,2) NOT NULL DEFAULT 35,
+  min_order NUMERIC(10,2) NOT NULL DEFAULT 0,
+  is_open BOOLEAN NOT NULL DEFAULT true,
+  is_featured BOOLEAN NOT NULL DEFAULT false,
+  address VARCHAR(500),
+  latitude NUMERIC(10,7),
+  longitude NUMERIC(10,7),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS menu_categories (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  restaurant_id UUID NOT NULL REFERENCES restaurants(id) ON DELETE CASCADE,
+  name VARCHAR(200) NOT NULL,
+  display_order INT NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS menu_items (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  menu_category_id UUID NOT NULL REFERENCES menu_categories(id) ON DELETE CASCADE,
+  restaurant_id UUID NOT NULL REFERENCES restaurants(id) ON DELETE CASCADE,
+  name VARCHAR(200) NOT NULL,
+  description TEXT,
+  price NUMERIC(10,2) NOT NULL,
+  image VARCHAR(500),
+  is_available BOOLEAN NOT NULL DEFAULT true,
+  display_order INT NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS addon_groups (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  menu_item_id UUID NOT NULL REFERENCES menu_items(id) ON DELETE CASCADE,
+  name VARCHAR(200) NOT NULL,
+  min_selections INT NOT NULL DEFAULT 0,
+  max_selections INT NOT NULL DEFAULT 1
+);
+
+CREATE TABLE IF NOT EXISTS addons (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  addon_group_id UUID NOT NULL REFERENCES addon_groups(id) ON DELETE CASCADE,
+  name VARCHAR(200) NOT NULL,
+  price NUMERIC(10,2) NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS user_addresses (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  label VARCHAR(100) NOT NULL DEFAULT 'Home',
+  street VARCHAR(300) NOT NULL,
+  suburb VARCHAR(200),
+  city VARCHAR(200) NOT NULL,
+  province VARCHAR(100),
+  postal_code VARCHAR(20),
+  latitude NUMERIC(10,7),
+  longitude NUMERIC(10,7),
+  is_default BOOLEAN NOT NULL DEFAULT false,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS orders (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES users(id),
+  restaurant_id UUID NOT NULL REFERENCES restaurants(id),
+  status VARCHAR(50) NOT NULL DEFAULT 'placed',
+  subtotal NUMERIC(10,2) NOT NULL,
+  delivery_fee NUMERIC(10,2) NOT NULL DEFAULT 35,
+  service_fee NUMERIC(10,2) NOT NULL DEFAULT 0,
+  discount NUMERIC(10,2) NOT NULL DEFAULT 0,
+  total NUMERIC(10,2) NOT NULL,
+  payment_method VARCHAR(50) NOT NULL,
+  payment_status VARCHAR(50) NOT NULL DEFAULT 'pending',
+  coupon_code VARCHAR(100),
+  delivery_address_id UUID REFERENCES user_addresses(id),
+  delivery_notes TEXT,
+  placed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  confirmed_at TIMESTAMPTZ,
+  picked_up_at TIMESTAMPTZ,
+  delivered_at TIMESTAMPTZ
+);
+
+CREATE TABLE IF NOT EXISTS order_items (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  order_id UUID NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+  menu_item_id UUID NOT NULL REFERENCES menu_items(id),
+  quantity INT NOT NULL DEFAULT 1,
+  unit_price NUMERIC(10,2) NOT NULL,
+  addon_ids JSONB NOT NULL DEFAULT '[]',
+  instructions TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_otps_phone_purpose ON otps(phone, purpose);
 CREATE INDEX IF NOT EXISTS idx_refresh_tokens_token ON refresh_tokens(token);
 CREATE INDEX IF NOT EXISTS idx_password_reset_tokens_token ON password_reset_tokens(token);
+CREATE INDEX IF NOT EXISTS idx_restaurants_category ON restaurants(category_id);
+CREATE INDEX IF NOT EXISTS idx_restaurants_featured ON restaurants(is_featured);
+CREATE INDEX IF NOT EXISTS idx_menu_items_restaurant ON menu_items(restaurant_id);
+CREATE INDEX IF NOT EXISTS idx_orders_user ON orders(user_id);
+CREATE INDEX IF NOT EXISTS idx_user_addresses_user ON user_addresses(user_id);
 `;
 
 async function migrate() {

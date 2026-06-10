@@ -3,6 +3,12 @@ import cors from 'cors';
 import helmet from 'helmet';
 import authRouter from './routes/auth';
 import devRouter from './routes/dev';
+import categoriesRouter from './routes/categories';
+import restaurantsRouter from './routes/restaurants';
+import usersRouter from './routes/users';
+import ordersRouter from './routes/orders';
+import paymentsRouter from './routes/payments';
+import couponsRouter from './routes/coupons';
 
 const app = express();
 
@@ -13,6 +19,12 @@ app.use(express.json());
 app.get('/health', (_req, res) => res.json({ status: 'ok' }));
 app.use('/auth', authRouter);
 app.use('/dev', devRouter);
+app.use('/categories', categoriesRouter);
+app.use('/restaurants', restaurantsRouter);
+app.use('/users', usersRouter);
+app.use('/orders', ordersRouter);
+app.use('/payments', paymentsRouter);
+app.use('/coupons', couponsRouter);
 
 // Global error handler
 app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
