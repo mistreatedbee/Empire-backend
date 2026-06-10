@@ -9,6 +9,7 @@ import usersRouter from './routes/users';
 import ordersRouter from './routes/orders';
 import paymentsRouter from './routes/payments';
 import couponsRouter from './routes/coupons';
+import notificationsRouter from './routes/notifications';
 
 const app = express();
 
@@ -25,6 +26,7 @@ app.use('/users', usersRouter);
 app.use('/orders', ordersRouter);
 app.use('/payments', paymentsRouter);
 app.use('/coupons', couponsRouter);
+app.use('/notifications', notificationsRouter);
 
 // Global error handler
 app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {

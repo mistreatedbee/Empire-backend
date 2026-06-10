@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { pool } from '../db';
+import { requireAuth, AuthRequest } from '../middleware/auth';
 import { ok, fail } from '../utils/response';
 
 const router = Router();
@@ -253,5 +254,66 @@ function mapMenuItem(item: Record<string, unknown>, addonGroups: unknown[]) {
     addonGroups,
   };
 }
+
+// POST /restaurants/:id/favourite  — toggle
+router.post('/:id/favourite', requireAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const { id: restaurantId } = req.params;
+    const existing = await pool.query(
+      'SELECT id FROM favourites WHERE user_id=$1 AND restaurant_id=$2',
+      [req.userId, restaurantId]
+    );
+    if (existing.rows.length) {
+      await pool.query('DELETE FROM favourites WHERE user_id=$1 AND restaurant_id=$2', [req.userId, restaurantId]);
+      ok(res, { isFavourited: false });
+    } else {
+      await pool.query(
+        'INSERT INTO favourites (user_id, restaurant_id) VALUES ($1,$2) ON CONFLICT DO NOTHING',
+        [req.userId, restaurantId]
+      );
+      ok(res, { isFavourited: true });
+    }
+  } catch (err) {
+    console.error('favourite toggle error:', err);
+    fail(res, 500, 'SERVER_ERROR', 'Something went wrong.');
+  }
+});
+
+// GET /restaurants/:id/reviews
+router.get('/:id/reviews', async (req: Request, res: Response) => {
+  try {
+    const page = parseInt((req.query.page as string) ?? '1', 10);
+    const limit = Math.min(parseInt((req.query.limit as string) ?? '10', 10), 50);
+    const offset = (page - 1) * limit;
+    const result = await pool.query(`
+      SELECT rr.id, rr.rating, rr.review, rr.created_at,
+             u.first_name, u.last_name
+      FROM restaurant_reviews rr
+      JOIN users u ON u.id = rr.user_id
+      WHERE rr.restaurant_id = $1
+      ORDER BY rr.created_at DESC
+      LIMIT $2 OFFSET $3
+    `, [req.params.id, limit, offset]);
+    const countRow = await pool.query(
+      'SELECT COUNT(*) FROM restaurant_reviews WHERE restaurant_id=$1',
+      [req.params.id]
+    );
+    ok(res, {
+      data: result.rows.map((r) => ({
+        id: r.id,
+        rating: r.rating,
+        review: r.review,
+        createdAt: r.created_at,
+        user: { firstName: r.first_name, lastName: r.last_name },
+      })),
+      total: parseInt(countRow.rows[0].count as string, 10),
+      page,
+      limit,
+    });
+  } catch (err) {
+    console.error('reviews error:', err);
+    fail(res, 500, 'SERVER_ERROR', 'Something went wrong.');
+  }
+});
 
 export default router;

@@ -3,6 +3,7 @@ dotenv.config();
 
 import app from './app';
 import { pool } from './db';
+import { startOrderAdvanceJob } from './jobs/orderAdvance';
 
 const PORT = process.env.PORT ?? 3000;
 
@@ -21,6 +22,7 @@ async function runMigration() {
 app.listen(PORT, async () => {
   console.log(`Empire Deliveries API running on port ${PORT}`);
   await runMigration();
+  startOrderAdvanceJob();
 });
 
 // ─── Inline migration SQL (idempotent — all CREATE TABLE IF NOT EXISTS) ───────
@@ -162,7 +164,8 @@ CREATE TABLE IF NOT EXISTS orders (
   placed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   confirmed_at TIMESTAMPTZ,
   picked_up_at TIMESTAMPTZ,
-  delivered_at TIMESTAMPTZ
+  delivered_at TIMESTAMPTZ,
+  status_updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS order_items (
@@ -175,6 +178,57 @@ CREATE TABLE IF NOT EXISTS order_items (
   instructions TEXT
 );
 
+CREATE TABLE IF NOT EXISTS push_tokens (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  token TEXT NOT NULL UNIQUE,
+  platform VARCHAR(20) NOT NULL DEFAULT 'unknown',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS notifications (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  type VARCHAR(100) NOT NULL,
+  title VARCHAR(300) NOT NULL,
+  body TEXT NOT NULL,
+  data JSONB NOT NULL DEFAULT '{}',
+  is_read BOOLEAN NOT NULL DEFAULT false,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS favourites (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  restaurant_id UUID NOT NULL REFERENCES restaurants(id) ON DELETE CASCADE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE(user_id, restaurant_id)
+);
+
+CREATE TABLE IF NOT EXISTS restaurant_reviews (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES users(id),
+  restaurant_id UUID NOT NULL REFERENCES restaurants(id),
+  order_id UUID NOT NULL UNIQUE REFERENCES orders(id),
+  rating SMALLINT NOT NULL CHECK (rating >= 1 AND rating <= 5),
+  review TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS coupons (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  code VARCHAR(50) UNIQUE NOT NULL,
+  discount_type VARCHAR(20) NOT NULL DEFAULT 'percentage',
+  discount_value NUMERIC(10,2) NOT NULL,
+  max_discount NUMERIC(10,2),
+  min_order NUMERIC(10,2) NOT NULL DEFAULT 0,
+  expires_at TIMESTAMPTZ,
+  is_active BOOLEAN NOT NULL DEFAULT true,
+  max_uses INT,
+  uses_count INT NOT NULL DEFAULT 0,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE INDEX IF NOT EXISTS idx_otps_phone_purpose ON otps(phone, purpose);
 CREATE INDEX IF NOT EXISTS idx_refresh_tokens_token ON refresh_tokens(token);
 CREATE INDEX IF NOT EXISTS idx_password_reset_tokens_token ON password_reset_tokens(token);
@@ -183,4 +237,9 @@ CREATE INDEX IF NOT EXISTS idx_restaurants_featured ON restaurants(is_featured);
 CREATE INDEX IF NOT EXISTS idx_menu_items_restaurant ON menu_items(restaurant_id);
 CREATE INDEX IF NOT EXISTS idx_orders_user ON orders(user_id);
 CREATE INDEX IF NOT EXISTS idx_user_addresses_user ON user_addresses(user_id);
+CREATE INDEX IF NOT EXISTS idx_push_tokens_user ON push_tokens(user_id);
+CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_favourites_user ON favourites(user_id);
+CREATE INDEX IF NOT EXISTS idx_reviews_restaurant ON restaurant_reviews(restaurant_id);
+CREATE INDEX IF NOT EXISTS idx_orders_status_updated ON orders(status, status_updated_at);
 `;

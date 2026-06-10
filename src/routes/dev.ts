@@ -63,6 +63,7 @@ router.post('/seed', async (req: Request, res: Response) => {
       await seedDebonairs(client, catMap['pizza']);
       await seedKauai(client, catMap['healthy']);
       await seedOceanBasket(client, catMap['seafood']);
+      await seedCoupons(client);
 
       res.json({ success: true, data: { message: 'Demo data seeded successfully.' } });
     } finally {
@@ -122,6 +123,21 @@ async function upsertGroup(client: import('pg').PoolClient, itemId: string, name
   for (const a of addons) {
     await client.query(`INSERT INTO addons (addon_group_id, name, price) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING`, [gid, a.name, a.price]);
   }
+}
+
+async function seedCoupons(client: import('pg').PoolClient) {
+  await client.query(`
+    INSERT INTO coupons (code, discount_type, discount_value, max_discount, min_order, is_active)
+    VALUES
+      ('EMPIRE10', 'percentage', 10, 50, 100, true),
+      ('WELCOME20', 'fixed', 20, NULL, 80, true)
+    ON CONFLICT (code) DO UPDATE SET
+      discount_type=EXCLUDED.discount_type,
+      discount_value=EXCLUDED.discount_value,
+      max_discount=EXCLUDED.max_discount,
+      min_order=EXCLUDED.min_order,
+      is_active=EXCLUDED.is_active
+  `);
 }
 
 async function seedNandos(client: import('pg').PoolClient, catId: string) {

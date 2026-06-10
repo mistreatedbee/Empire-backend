@@ -187,6 +187,50 @@ router.post('/:id/cancel', requireAuth, async (req: AuthRequest, res: Response) 
   }
 });
 
+// POST /orders/:id/rate
+router.post('/:id/rate', requireAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const { rating, review } = req.body;
+    if (!rating || rating < 1 || rating > 5) {
+      fail(res, 400, 'VALIDATION_ERROR', 'rating must be between 1 and 5.');
+      return;
+    }
+    const client = await pool.connect();
+    try {
+      const orderRow = await client.query(
+        'SELECT id, restaurant_id FROM orders WHERE id=$1 AND user_id=$2 AND status=$3',
+        [req.params.id, req.userId, 'delivered']
+      );
+      if (!orderRow.rows.length) {
+        fail(res, 404, 'NOT_FOUND', 'Delivered order not found.');
+        return;
+      }
+      const restaurantId = orderRow.rows[0].restaurant_id as string;
+
+      await client.query(`
+        INSERT INTO restaurant_reviews (user_id, restaurant_id, order_id, rating, review)
+        VALUES ($1,$2,$3,$4,$5)
+        ON CONFLICT (order_id) DO UPDATE SET rating=$4, review=$5
+      `, [req.userId, restaurantId, req.params.id, rating, review ?? null]);
+
+      // Recalculate restaurant average rating
+      await client.query(`
+        UPDATE restaurants
+        SET rating = (SELECT ROUND(AVG(rating)::NUMERIC, 2) FROM restaurant_reviews WHERE restaurant_id=$1),
+            review_count = (SELECT COUNT(*) FROM restaurant_reviews WHERE restaurant_id=$1)
+        WHERE id=$1
+      `, [restaurantId]);
+
+      ok(res, null);
+    } finally {
+      client.release();
+    }
+  } catch (err) {
+    console.error('rate order error:', err);
+    fail(res, 500, 'SERVER_ERROR', 'Something went wrong.');
+  }
+});
+
 async function fetchOrderDetail(client: import('pg').PoolClient, orderId: string) {
   const [orderRes, itemsRes] = await Promise.all([
     client.query(`
