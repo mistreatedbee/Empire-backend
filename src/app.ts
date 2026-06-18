@@ -39,7 +39,7 @@ app.use(pinoHttp({ logger }));
 // ── Rate limiting ─────────────────────────────────────────────────────────────
 const globalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 200,
+  max: 600,
   standardHeaders: true,
   legacyHeaders: false,
   message: { code: 'RATE_LIMIT', message: 'Too many requests. Please slow down.' },
@@ -47,7 +47,7 @@ const globalLimiter = rateLimit({
 
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 20,
+  max: 60,
   standardHeaders: true,
   legacyHeaders: false,
   message: { code: 'RATE_LIMIT', message: 'Too many auth attempts. Try again later.' },

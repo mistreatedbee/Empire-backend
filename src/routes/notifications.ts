@@ -13,29 +13,20 @@ router.get('/', requireAuth, async (req: AuthRequest, res: Response) => {
     const limit = Math.min(parseInt((req.query.limit as string) ?? '20', 10), 50);
     const offset = (page - 1) * limit;
 
-    const [dataRes, countRes] = await Promise.all([
-      pool.query(
-        `SELECT * FROM notifications WHERE user_id=$1 ORDER BY created_at DESC LIMIT $2 OFFSET $3`,
-        [req.userId, limit, offset]
-      ),
-      pool.query('SELECT COUNT(*) FROM notifications WHERE user_id=$1', [req.userId]),
-    ]);
+    const dataRes = await pool.query(
+      `SELECT * FROM notifications WHERE user_id=$1 ORDER BY created_at DESC LIMIT $2 OFFSET $3`,
+      [req.userId, limit, offset]
+    );
 
-    ok(res, {
-      data: dataRes.rows.map((n) => ({
-        id: n.id,
-        type: n.type,
-        title: n.title,
-        body: n.body,
-        data: n.data,
-        isRead: n.is_read,
-        createdAt: n.created_at,
-      })),
-      total: parseInt(countRes.rows[0].count as string, 10),
-      page,
-      limit,
-      unreadCount: dataRes.rows.filter((n) => !n.is_read).length,
-    });
+    ok(res, dataRes.rows.map((n) => ({
+      id: n.id,
+      type: n.type,
+      title: n.title,
+      body: n.body,
+      data: n.data,
+      isRead: n.is_read,
+      createdAt: n.created_at,
+    })));
   } catch (err) {
     logger.error({ err }, 'list notifications');
     fail(res, 500, 'SERVER_ERROR', 'Something went wrong.');
