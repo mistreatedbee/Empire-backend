@@ -66,6 +66,11 @@ router.post('/sync', async (req: Request, res: Response) => {
     );
     ok(res, mapUser(result.rows[0]), undefined, 201);
   } catch (err) {
+    const pgErr = err as { code?: string; constraint?: string };
+    if (pgErr.code === '23505' && pgErr.constraint === 'users_phone_key') {
+      fail(res, 409, 'PHONE_TAKEN', 'This phone number is already registered to a different account.');
+      return;
+    }
     logger.error({ err }, 'auth/sync');
     fail(res, 500, 'SERVER_ERROR', 'Something went wrong. Please try again.');
   }

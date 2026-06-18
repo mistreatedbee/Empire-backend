@@ -69,22 +69,26 @@ router.post('/driver', requireAuth, async (req: AuthRequest, res: Response) => {
     const {
       idNumber, dateOfBirth, vehicleType, vehicleMake, vehicleModel,
       vehicleYear, vehicleReg, bankName, bankAccountNo, bankHolder, bankBranch,
+      idDocumentUrl, driversLicenseUrl, vehicleRegistrationUrl,
     } = req.body as Record<string, string>;
 
     await pool.query(
       `INSERT INTO driver_applications
          (user_id, id_number, date_of_birth, vehicle_type, vehicle_make, vehicle_model,
-          vehicle_year, vehicle_reg, bank_name, bank_account_no, bank_holder, bank_branch)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+          vehicle_year, vehicle_reg, bank_name, bank_account_no, bank_holder, bank_branch,
+          id_document_url, drivers_license_url, vehicle_registration_url)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
        ON CONFLICT (user_id) DO UPDATE SET
          id_number=$2, date_of_birth=$3, vehicle_type=$4, vehicle_make=$5, vehicle_model=$6,
          vehicle_year=$7, vehicle_reg=$8, bank_name=$9, bank_account_no=$10,
-         bank_holder=$11, bank_branch=$12, submitted_at=NOW(), status='pending'`,
+         bank_holder=$11, bank_branch=$12, id_document_url=$13, drivers_license_url=$14,
+         vehicle_registration_url=$15, submitted_at=NOW(), status='pending'`,
       [
         userId, idNumber ?? null, dateOfBirth ?? null, vehicleType ?? null,
         vehicleMake ?? null, vehicleModel ?? null, vehicleYear ? parseInt(vehicleYear) : null,
         vehicleReg ?? null, bankName ?? null, bankAccountNo ?? null,
         bankHolder ?? null, bankBranch ?? null,
+        idDocumentUrl ?? null, driversLicenseUrl ?? null, vehicleRegistrationUrl ?? null,
       ]
     );
 
@@ -110,8 +114,9 @@ router.post('/restaurant', requireAuth, async (req: AuthRequest, res: Response) 
     }
 
     const {
-      tradingName, businessRegNo, cuisineType, address, city,
+      tradingName, businessRegNo, cuisineType, address, city, description,
       operatingHours, bankName, bankAccountNo, bankHolder,
+      minOrder, deliveryFee, deliveryRadius,
     } = req.body as Record<string, string>;
 
     if (!tradingName?.trim()) {
@@ -121,18 +126,23 @@ router.post('/restaurant', requireAuth, async (req: AuthRequest, res: Response) 
 
     await pool.query(
       `INSERT INTO restaurant_applications
-         (user_id, trading_name, business_reg_no, cuisine_type, address, city,
-          operating_hours, bank_name, bank_account_no, bank_holder)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+         (user_id, trading_name, business_reg_no, cuisine_type, address, city, description,
+          operating_hours, bank_name, bank_account_no, bank_holder,
+          min_order, delivery_fee, delivery_radius)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
        ON CONFLICT (user_id) DO UPDATE SET
-         trading_name=$2, business_reg_no=$3, cuisine_type=$4, address=$5, city=$6,
-         operating_hours=$7, bank_name=$8, bank_account_no=$9, bank_holder=$10,
+         trading_name=$2, business_reg_no=$3, cuisine_type=$4, address=$5, city=$6, description=$7,
+         operating_hours=$8, bank_name=$9, bank_account_no=$10, bank_holder=$11,
+         min_order=$12, delivery_fee=$13, delivery_radius=$14,
          submitted_at=NOW(), status='pending'`,
       [
         userId, tradingName.trim(), businessRegNo ?? null, cuisineType ?? null,
-        address ?? null, city ?? null,
-        operatingHours ? JSON.stringify(operatingHours) : null,
+        address ?? null, city ?? null, description ?? null,
+        operatingHours ?? null,
         bankName ?? null, bankAccountNo ?? null, bankHolder ?? null,
+        minOrder ? parseFloat(minOrder) : null,
+        deliveryFee ? parseFloat(deliveryFee) : null,
+        deliveryRadius ? parseFloat(deliveryRadius) : null,
       ]
     );
 

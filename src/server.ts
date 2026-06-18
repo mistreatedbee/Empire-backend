@@ -308,6 +308,15 @@ CREATE INDEX IF NOT EXISTS idx_driver_apps_status ON driver_applications(status)
 CREATE INDEX IF NOT EXISTS idx_restaurant_apps_status ON restaurant_applications(status);
 CREATE INDEX IF NOT EXISTS idx_admin_audit_admin ON admin_audit_log(admin_id, created_at DESC);
 
+-- Phase 12: application document uploads + restaurant delivery settings
+ALTER TABLE driver_applications ADD COLUMN IF NOT EXISTS id_document_url VARCHAR(500);
+ALTER TABLE driver_applications ADD COLUMN IF NOT EXISTS drivers_license_url VARCHAR(500);
+ALTER TABLE driver_applications ADD COLUMN IF NOT EXISTS vehicle_registration_url VARCHAR(500);
+ALTER TABLE restaurant_applications ADD COLUMN IF NOT EXISTS description TEXT;
+ALTER TABLE restaurant_applications ADD COLUMN IF NOT EXISTS min_order NUMERIC(10,2);
+ALTER TABLE restaurant_applications ADD COLUMN IF NOT EXISTS delivery_fee NUMERIC(10,2);
+ALTER TABLE restaurant_applications ADD COLUMN IF NOT EXISTS delivery_radius NUMERIC(10,2);
+
 -- Phase 12: loyalty system
 ALTER TABLE users ADD COLUMN IF NOT EXISTS loyalty_points_balance INT NOT NULL DEFAULT 0;
 
