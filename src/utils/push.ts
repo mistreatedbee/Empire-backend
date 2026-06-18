@@ -1,5 +1,6 @@
 import Expo, { ExpoPushMessage } from 'expo-server-sdk';
 import { pool } from '../db';
+import { logger } from './logger';
 
 const expo = new Expo();
 
@@ -33,10 +34,10 @@ export async function sendPushToUser(
       try {
         await expo.sendPushNotificationsAsync(chunk);
       } catch (err) {
-        console.error('Push send error:', err);
+        logger.error({ err }, 'push send error');
       }
     }
   } catch (err) {
-    console.error('sendPushToUser error:', err);
+    logger.error({ err }, 'sendPushToUser error');
   }
 }

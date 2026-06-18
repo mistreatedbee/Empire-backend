@@ -1,5 +1,6 @@
 import { pool } from '../db';
 import { sendPushToUser } from './push';
+import { logger } from './logger';
 
 export async function notify(
   userId: string,
@@ -16,6 +17,6 @@ export async function notify(
     );
     await sendPushToUser(userId, title, body, data);
   } catch (err) {
-    console.error('notify error:', err);
+    logger.error({ err }, 'notify error');
   }
 }

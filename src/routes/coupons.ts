@@ -1,3 +1,4 @@
+import { logger } from '../utils/logger';
 import { Router, Request, Response } from 'express';
 import { pool } from '../db';
 import { ok, fail } from '../utils/response';
@@ -60,7 +61,7 @@ router.get('/validate', async (req: Request, res: Response) => {
         : `R${parseFloat(c.discount_value).toFixed(2)} off applied!`,
     });
   } catch (err) {
-    console.error('coupon validate error:', err);
+    logger.error({ err }, 'coupon validate');
     fail(res, 500, 'SERVER_ERROR', 'Something went wrong.');
   }
 });

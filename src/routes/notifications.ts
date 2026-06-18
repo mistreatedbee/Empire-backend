@@ -1,3 +1,4 @@
+import { logger } from '../utils/logger';
 import { Router, Response } from 'express';
 import { pool } from '../db';
 import { requireAuth, AuthRequest } from '../middleware/auth';
@@ -36,7 +37,7 @@ router.get('/', requireAuth, async (req: AuthRequest, res: Response) => {
       unreadCount: dataRes.rows.filter((n) => !n.is_read).length,
     });
   } catch (err) {
-    console.error('list notifications error:', err);
+    logger.error({ err }, 'list notifications');
     fail(res, 500, 'SERVER_ERROR', 'Something went wrong.');
   }
 });
@@ -47,7 +48,7 @@ router.put('/read-all', requireAuth, async (req: AuthRequest, res: Response) => 
     await pool.query('UPDATE notifications SET is_read=true WHERE user_id=$1', [req.userId]);
     ok(res, null);
   } catch (err) {
-    console.error('read-all error:', err);
+    logger.error({ err }, 'read-all');
     fail(res, 500, 'SERVER_ERROR', 'Something went wrong.');
   }
 });
@@ -65,7 +66,7 @@ router.put('/:id/read', requireAuth, async (req: AuthRequest, res: Response) => 
     }
     ok(res, null);
   } catch (err) {
-    console.error('read notification error:', err);
+    logger.error({ err }, 'read notification');
     fail(res, 500, 'SERVER_ERROR', 'Something went wrong.');
   }
 });
@@ -86,7 +87,7 @@ router.post('/token', requireAuth, async (req: AuthRequest, res: Response) => {
     );
     ok(res, null);
   } catch (err) {
-    console.error('register token error:', err);
+    logger.error({ err }, 'register token');
     fail(res, 500, 'SERVER_ERROR', 'Something went wrong.');
   }
 });
@@ -100,7 +101,7 @@ router.delete('/token/:token', requireAuth, async (req: AuthRequest, res: Respon
     );
     ok(res, null);
   } catch (err) {
-    console.error('delete token error:', err);
+    logger.error({ err }, 'delete token');
     fail(res, 500, 'SERVER_ERROR', 'Something went wrong.');
   }
 });

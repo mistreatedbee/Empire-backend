@@ -1,3 +1,4 @@
+import { logger } from '../utils/logger';
 import { Router, Request, Response } from 'express';
 import bcrypt from 'bcryptjs';
 import { pool } from '../db';
@@ -8,43 +9,86 @@ import { ok, fail } from '../utils/response';
 
 const router = Router();
 
+function isStrongPassword(pw: string): boolean {
+  return pw.length >= 8 && /[A-Z]/.test(pw) && /[a-z]/.test(pw) && /[0-9]/.test(pw);
+}
+
 // POST /auth/register
 router.post('/register', async (req: Request, res: Response) => {
+  const { firstName, lastName, email, phone, password } = req.body;
   try {
-    const { firstName, lastName, email, phone, password } = req.body;
-
     if (!firstName || !lastName || !email || !phone || !password) {
       fail(res, 400, 'VALIDATION_ERROR', 'All fields are required.');
       return;
     }
 
+    if (!isStrongPassword(password as string)) {
+      fail(res, 400, 'WEAK_PASSWORD', 'Password must be at least 8 characters and include uppercase, lowercase, and a number.', 'password');
+      return;
+    }
+
     const client = await pool.connect();
     try {
-      const byEmail = await client.query('SELECT id FROM users WHERE email = $1', [email.toLowerCase()]);
+      await client.query('BEGIN');
+
+      // If the account exists but is unverified, just resend the OTP
+      const byEmail = await client.query(
+        'SELECT id, is_verified FROM users WHERE email = $1',
+        [email.toLowerCase()]
+      );
       if (byEmail.rows.length > 0) {
+        if (!byEmail.rows[0].is_verified) {
+          await client.query('ROLLBACK');
+          await sendOtp(email.toLowerCase().trim());
+          ok(res, { message: 'A verification code has been sent to your email.' }, undefined, 200);
+          return;
+        }
+        await client.query('ROLLBACK');
         fail(res, 409, 'EMAIL_TAKEN', 'An account with this email already exists.', 'email');
         return;
       }
-      const byPhone = await client.query('SELECT id FROM users WHERE phone = $1', [phone]);
+
+      const byPhone = await client.query(
+        'SELECT id, is_verified FROM users WHERE phone = $1',
+        [phone]
+      );
       if (byPhone.rows.length > 0) {
+        if (!byPhone.rows[0].is_verified) {
+          await client.query('ROLLBACK');
+          await sendOtp(phone);
+          ok(res, { message: 'A verification code has been sent to your phone.' }, undefined, 200);
+          return;
+        }
+        await client.query('ROLLBACK');
         fail(res, 409, 'PHONE_TAKEN', 'An account with this phone number already exists.', 'phone');
         return;
       }
 
+      const allowedRoles = ['customer', 'driver', 'restaurant'];
+      const role = allowedRoles.includes(req.body.role as string) ? (req.body.role as string) : 'customer';
+      const approvalStatus = role === 'customer' ? 'approved' : 'pending';
+
       const passwordHash = await bcrypt.hash(password, 12);
       await client.query(
-        `INSERT INTO users (first_name, last_name, email, phone, password_hash, role)
-         VALUES ($1, $2, $3, $4, $5, 'customer')`,
-        [firstName.trim(), lastName.trim(), email.toLowerCase().trim(), phone, passwordHash]
+        `INSERT INTO users (first_name, last_name, email, phone, password_hash, role, approval_status)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        [firstName.trim(), lastName.trim(), email.toLowerCase().trim(), phone, passwordHash, role, approvalStatus]
       );
+
+      // Send email code while still in transaction — if it throws, INSERT rolls back
+      await sendOtp(email.toLowerCase().trim());
+
+      await client.query('COMMIT');
+    } catch (innerErr) {
+      await client.query('ROLLBACK');
+      throw innerErr;
     } finally {
       client.release();
     }
 
-    await sendOtp(phone);
-    ok(res, { message: 'Account created. Please verify your phone number.' }, undefined, 201);
+    ok(res, { message: 'Account created. Please verify your email address.' }, undefined, 201);
   } catch (err) {
-    console.error('register error:', err);
+    logger.error({ err }, 'register');
     fail(res, 500, 'SERVER_ERROR', 'Something went wrong. Please try again.');
   }
 });
@@ -52,13 +96,13 @@ router.post('/register', async (req: Request, res: Response) => {
 // POST /auth/verify-otp
 router.post('/verify-otp', async (req: Request, res: Response) => {
   try {
-    const { phone, otp, purpose } = req.body;
-    if (!phone || !otp || !purpose) {
-      fail(res, 400, 'VALIDATION_ERROR', 'phone, otp, and purpose are required.');
+    const { email, otp, purpose } = req.body;
+    if (!email || !otp || !purpose) {
+      fail(res, 400, 'VALIDATION_ERROR', 'email, otp, and purpose are required.');
       return;
     }
 
-    const approved = await checkOtp(phone, otp);
+    const approved = await checkOtp(email.toLowerCase(), otp);
     if (!approved) {
       fail(res, 400, 'OTP_INVALID', 'Invalid or expired code. Please try again.');
       return;
@@ -68,11 +112,11 @@ router.post('/verify-otp', async (req: Request, res: Response) => {
     try {
       const userRow = await client.query(
         `UPDATE users SET is_verified = true, updated_at = NOW()
-         WHERE phone = $1 RETURNING id, first_name, last_name, email, phone, role, profile_image, is_verified, created_at, updated_at`,
-        [phone]
+         WHERE email = $1 RETURNING id, first_name, last_name, email, phone, role, profile_image, is_verified, created_at, updated_at`,
+        [email.toLowerCase()]
       );
       if (!userRow.rows.length) {
-        fail(res, 404, 'NOT_FOUND', 'No account found for this phone number.');
+        fail(res, 404, 'NOT_FOUND', 'No account found for this email address.');
         return;
       }
       const user = mapUser(userRow.rows[0]);
@@ -87,7 +131,7 @@ router.post('/verify-otp', async (req: Request, res: Response) => {
       client.release();
     }
   } catch (err) {
-    console.error('verify-otp error:', err);
+    logger.error({ err }, 'verify-otp');
     fail(res, 500, 'SERVER_ERROR', 'Something went wrong. Please try again.');
   }
 });
@@ -95,23 +139,23 @@ router.post('/verify-otp', async (req: Request, res: Response) => {
 // POST /auth/resend-otp
 router.post('/resend-otp', async (req: Request, res: Response) => {
   try {
-    const { phone } = req.body;
-    if (!phone) {
-      fail(res, 400, 'VALIDATION_ERROR', 'Phone number is required.');
+    const { email } = req.body;
+    if (!email) {
+      fail(res, 400, 'VALIDATION_ERROR', 'Email address is required.');
       return;
     }
 
-    const row = await pool.query('SELECT id FROM users WHERE phone = $1', [phone]);
+    const row = await pool.query('SELECT id FROM users WHERE email = $1', [email.toLowerCase()]);
     if (!row.rows.length) {
-      fail(res, 404, 'NOT_FOUND', 'No account found with this phone number.');
+      fail(res, 404, 'NOT_FOUND', 'No account found with this email address.');
       return;
     }
 
-    await sendOtp(phone);
-    ok(res, { message: 'A new verification code has been sent.' });
+    await sendOtp(email.toLowerCase());
+    ok(res, { message: 'A new verification code has been sent to your email.' });
   } catch (err) {
-    console.error('resend-otp error:', err);
-    fail(res, 500, 'SERVER_ERROR', 'Something went wrong. Please try again.');
+    logger.error({ err }, 'resend-otp');
+    fail(res, 500, 'Something went wrong. Please try again.');
   }
 });
 
@@ -127,7 +171,7 @@ router.post('/login', async (req: Request, res: Response) => {
     const client = await pool.connect();
     try {
       const userRow = await client.query(
-        `SELECT id, first_name, last_name, email, phone, password_hash, role, profile_image, is_verified, created_at, updated_at
+        `SELECT id, first_name, last_name, email, phone, password_hash, role, profile_image, is_verified, approval_status, suspension_reason, created_at, updated_at
          FROM users WHERE email = $1 OR phone = $2 LIMIT 1`,
         [email?.toLowerCase() ?? '', phone ?? '']
       );
@@ -145,7 +189,21 @@ router.post('/login', async (req: Request, res: Response) => {
       }
 
       if (!row.is_verified) {
-        fail(res, 403, 'UNVERIFIED', 'Please verify your phone number before signing in.');
+        fail(res, 403, 'UNVERIFIED', 'Please verify your email address before signing in.');
+        return;
+      }
+
+      const approvalStatus = (row.approval_status as string) ?? 'approved';
+      if (approvalStatus === 'pending') {
+        fail(res, 403, 'PENDING_APPROVAL', 'Your account is pending review. You will be notified once approved.');
+        return;
+      }
+      if (approvalStatus === 'suspended') {
+        fail(res, 403, 'ACCOUNT_SUSPENDED', (row.suspension_reason as string) || 'Your account has been suspended. Please contact support.');
+        return;
+      }
+      if (approvalStatus === 'rejected') {
+        fail(res, 403, 'APPLICATION_REJECTED', 'Your application was not approved. Please contact support for more information.');
         return;
       }
 
@@ -161,7 +219,7 @@ router.post('/login', async (req: Request, res: Response) => {
       client.release();
     }
   } catch (err) {
-    console.error('login error:', err);
+    logger.error({ err }, 'login');
     fail(res, 500, 'SERVER_ERROR', 'Something went wrong. Please try again.');
   }
 });
@@ -172,7 +230,7 @@ router.post('/logout', requireAuth, async (req: AuthRequest, res: Response) => {
     await pool.query('DELETE FROM refresh_tokens WHERE user_id = $1', [req.userId]);
     ok(res, null);
   } catch (err) {
-    console.error('logout error:', err);
+    logger.error({ err }, 'logout');
     fail(res, 500, 'SERVER_ERROR', 'Something went wrong. Please try again.');
   }
 });
@@ -191,7 +249,7 @@ router.get('/me', requireAuth, async (req: AuthRequest, res: Response) => {
     }
     ok(res, mapUser(row.rows[0]));
   } catch (err) {
-    console.error('me error:', err);
+    logger.error({ err }, 'me');
     fail(res, 500, 'SERVER_ERROR', 'Something went wrong. Please try again.');
   }
 });
@@ -236,7 +294,7 @@ router.post('/refresh', async (req: Request, res: Response) => {
       client.release();
     }
   } catch (err) {
-    console.error('refresh error:', err);
+    logger.error({ err }, 'refresh');
     fail(res, 500, 'SERVER_ERROR', 'Something went wrong. Please try again.');
   }
 });
@@ -250,14 +308,14 @@ router.post('/forgot-password', async (req: Request, res: Response) => {
       return;
     }
 
-    const userRow = await pool.query('SELECT phone FROM users WHERE email = $1', [email.toLowerCase()]);
+    const userRow = await pool.query('SELECT id FROM users WHERE email = $1', [email.toLowerCase()]);
     // Always respond with success to prevent email enumeration
     if (userRow.rows.length > 0) {
-      await sendOtp(userRow.rows[0].phone as string);
+      await sendOtp(email.toLowerCase());
     }
-    ok(res, { message: 'If an account exists, a reset code has been sent to your phone.' });
+    ok(res, { message: 'If an account exists, a reset code has been sent to your email.' });
   } catch (err) {
-    console.error('forgot-password error:', err);
+    logger.error({ err }, 'forgot-password');
     fail(res, 500, 'SERVER_ERROR', 'Something went wrong. Please try again.');
   }
 });
@@ -270,19 +328,25 @@ router.post('/reset-password', async (req: Request, res: Response) => {
       fail(res, 400, 'VALIDATION_ERROR', 'token and newPassword are required.');
       return;
     }
-    if ((newPassword as string).length < 8) {
-      fail(res, 400, 'VALIDATION_ERROR', 'Password must be at least 8 characters.', 'newPassword');
+    if (!isStrongPassword(newPassword as string)) {
+      fail(res, 400, 'WEAK_PASSWORD', 'Password must be at least 8 characters with uppercase, lowercase, and a number.', 'newPassword');
       return;
     }
 
-    // token is "phone:otp" — passed by the mobile OTP screen
-    const [phone, otp] = (token as string).split(':');
-    if (!phone || !otp) {
+    // token is "email:otp" — passed by the mobile OTP screen
+    const colonIdx = (token as string).indexOf(':');
+    if (colonIdx === -1) {
+      fail(res, 400, 'TOKEN_INVALID', 'Invalid reset token.');
+      return;
+    }
+    const email = (token as string).slice(0, colonIdx).toLowerCase();
+    const otp = (token as string).slice(colonIdx + 1);
+    if (!email || !otp) {
       fail(res, 400, 'TOKEN_INVALID', 'Invalid reset token.');
       return;
     }
 
-    const approved = await checkOtp(phone, otp);
+    const approved = await checkOtp(email, otp);
     if (!approved) {
       fail(res, 400, 'TOKEN_INVALID', 'Invalid or expired reset code.');
       return;
@@ -290,12 +354,12 @@ router.post('/reset-password', async (req: Request, res: Response) => {
 
     const passwordHash = await bcrypt.hash(newPassword, 12);
     await pool.query(
-      'UPDATE users SET password_hash = $1, updated_at = NOW() WHERE phone = $2',
-      [passwordHash, phone]
+      'UPDATE users SET password_hash = $1, updated_at = NOW() WHERE email = $2',
+      [passwordHash, email]
     );
     ok(res, { message: 'Password updated successfully.' });
   } catch (err) {
-    console.error('reset-password error:', err);
+    logger.error({ err }, 'reset-password');
     fail(res, 500, 'SERVER_ERROR', 'Something went wrong. Please try again.');
   }
 });

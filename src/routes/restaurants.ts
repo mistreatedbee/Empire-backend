@@ -1,3 +1,4 @@
+import { logger } from '../utils/logger';
 import { Router, Request, Response } from 'express';
 import { pool } from '../db';
 import { requireAuth, AuthRequest } from '../middleware/auth';
@@ -18,7 +19,7 @@ router.get('/featured', async (_req: Request, res: Response) => {
     `);
     ok(res, result.rows.map(mapRestaurant));
   } catch (err) {
-    console.error('featured error:', err);
+    logger.error({ err }, 'featured');
     fail(res, 500, 'SERVER_ERROR', 'Something went wrong.');
   }
 });
@@ -36,7 +37,7 @@ router.get('/popular', async (_req: Request, res: Response) => {
     `);
     ok(res, result.rows.map(mapRestaurant));
   } catch (err) {
-    console.error('popular error:', err);
+    logger.error({ err }, 'popular');
     fail(res, 500, 'SERVER_ERROR', 'Something went wrong.');
   }
 });
@@ -69,7 +70,7 @@ router.get('/search', async (req: Request, res: Response) => {
     ]);
     ok(res, { restaurants: rRes.rows.map(mapRestaurant), menuItems: mRes.rows });
   } catch (err) {
-    console.error('search error:', err);
+    logger.error({ err }, 'search');
     fail(res, 500, 'SERVER_ERROR', 'Something went wrong.');
   }
 });
@@ -97,7 +98,7 @@ router.get('/', async (req: Request, res: Response) => {
     const result = await pool.query(sql, params);
     ok(res, { data: result.rows.map(mapRestaurant), total: result.rowCount });
   } catch (err) {
-    console.error('restaurants list error:', err);
+    logger.error({ err }, 'restaurants list');
     fail(res, 500, 'SERVER_ERROR', 'Something went wrong.');
   }
 });
@@ -117,7 +118,7 @@ router.get('/:id', async (req: Request, res: Response) => {
     }
     ok(res, mapRestaurant(result.rows[0]));
   } catch (err) {
-    console.error('restaurant detail error:', err);
+    logger.error({ err }, 'restaurant detail');
     fail(res, 500, 'SERVER_ERROR', 'Something went wrong.');
   }
 });
@@ -183,7 +184,7 @@ router.get('/:id/menu', async (req: Request, res: Response) => {
 
     ok(res, menu);
   } catch (err) {
-    console.error('menu error:', err);
+    logger.error({ err }, 'menu');
     fail(res, 500, 'SERVER_ERROR', 'Something went wrong.');
   }
 });
@@ -215,7 +216,7 @@ router.get('/:id/menu/:itemId', async (req: Request, res: Response) => {
     }));
     ok(res, mapMenuItem(item, addonGroups));
   } catch (err) {
-    console.error('menu item error:', err);
+    logger.error({ err }, 'menu item');
     fail(res, 500, 'SERVER_ERROR', 'Something went wrong.');
   }
 });
@@ -274,7 +275,7 @@ router.post('/:id/favourite', requireAuth, async (req: AuthRequest, res: Respons
       ok(res, { isFavourited: true });
     }
   } catch (err) {
-    console.error('favourite toggle error:', err);
+    logger.error({ err }, 'favourite toggle');
     fail(res, 500, 'SERVER_ERROR', 'Something went wrong.');
   }
 });
@@ -311,7 +312,7 @@ router.get('/:id/reviews', async (req: Request, res: Response) => {
       limit,
     });
   } catch (err) {
-    console.error('reviews error:', err);
+    logger.error({ err }, 'reviews');
     fail(res, 500, 'SERVER_ERROR', 'Something went wrong.');
   }
 });

@@ -1,3 +1,4 @@
+import { logger } from '../utils/logger';
 import { Router, Response } from 'express';
 import bcrypt from 'bcryptjs';
 import { pool } from '../db';
@@ -15,7 +16,7 @@ router.get('/addresses', requireAuth, async (req: AuthRequest, res: Response) =>
     );
     ok(res, result.rows.map(mapAddress));
   } catch (err) {
-    console.error('list addresses error:', err);
+    logger.error({ err }, 'list addresses');
     fail(res, 500, 'SERVER_ERROR', 'Something went wrong.');
   }
 });
@@ -48,7 +49,7 @@ router.post('/addresses', requireAuth, async (req: AuthRequest, res: Response) =
       client.release();
     }
   } catch (err) {
-    console.error('create address error:', err);
+    logger.error({ err }, 'create address');
     fail(res, 500, 'SERVER_ERROR', 'Something went wrong.');
   }
 });
@@ -70,7 +71,7 @@ router.put('/addresses/:id', requireAuth, async (req: AuthRequest, res: Response
     }
     ok(res, mapAddress(result.rows[0]));
   } catch (err) {
-    console.error('update address error:', err);
+    logger.error({ err }, 'update address');
     fail(res, 500, 'SERVER_ERROR', 'Something went wrong.');
   }
 });
@@ -88,7 +89,7 @@ router.delete('/addresses/:id', requireAuth, async (req: AuthRequest, res: Respo
     }
     ok(res, null);
   } catch (err) {
-    console.error('delete address error:', err);
+    logger.error({ err }, 'delete address');
     fail(res, 500, 'SERVER_ERROR', 'Something went wrong.');
   }
 });
@@ -115,7 +116,7 @@ router.put('/addresses/:id/default', requireAuth, async (req: AuthRequest, res: 
       client.release();
     }
   } catch (err) {
-    console.error('set default address error:', err);
+    logger.error({ err }, 'set default address');
     fail(res, 500, 'SERVER_ERROR', 'Something went wrong.');
   }
 });
@@ -137,7 +138,7 @@ router.put('/profile', requireAuth, async (req: AuthRequest, res: Response) => {
     `, [firstName, lastName, phone ?? null, profileImage ?? null, req.userId]);
     ok(res, mapUser(result.rows[0]));
   } catch (err) {
-    console.error('update profile error:', err);
+    logger.error({ err }, 'update profile');
     fail(res, 500, 'SERVER_ERROR', 'Something went wrong.');
   }
 });
@@ -164,7 +165,45 @@ router.post('/change-password', requireAuth, async (req: AuthRequest, res: Respo
     await pool.query('UPDATE users SET password_hash=$1, updated_at=NOW() WHERE id=$2', [hash, req.userId]);
     ok(res, null);
   } catch (err) {
-    console.error('change password error:', err);
+    logger.error({ err }, 'change password');
+    fail(res, 500, 'SERVER_ERROR', 'Something went wrong.');
+  }
+});
+
+// GET /users/loyalty
+router.get('/loyalty', requireAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const TIERS = [
+      { name: 'Bronze', min: 0, max: 499, next: 'Silver' },
+      { name: 'Silver', min: 500, max: 1499, next: 'Gold' },
+      { name: 'Gold', min: 1500, max: Infinity, next: null },
+    ];
+    const [userRow, txRows] = await Promise.all([
+      pool.query('SELECT loyalty_points_balance FROM users WHERE id=$1', [req.userId]),
+      pool.query(
+        `SELECT id, points, type, description, created_at FROM loyalty_transactions
+         WHERE user_id=$1 ORDER BY created_at DESC LIMIT 20`,
+        [req.userId]
+      ),
+    ]);
+    const balance = parseInt(String(userRow.rows[0]?.loyalty_points_balance ?? 0), 10);
+    const tier = TIERS.find((t) => balance >= t.min && balance <= t.max) ?? TIERS[0];
+    const pointsToNextTier = tier.next ? (TIERS.find((t) => t.name === tier.next)!.min - balance) : 0;
+    ok(res, {
+      balance,
+      tier: tier.name,
+      nextTier: tier.next,
+      pointsToNextTier,
+      recentTransactions: txRows.rows.map((r) => ({
+        id: r.id,
+        points: r.points,
+        type: r.type,
+        description: r.description,
+        createdAt: r.created_at,
+      })),
+    });
+  } catch (err) {
+    logger.error({ err }, 'loyalty');
     fail(res, 500, 'SERVER_ERROR', 'Something went wrong.');
   }
 });
@@ -187,7 +226,7 @@ router.get('/favourites', requireAuth, async (req: AuthRequest, res: Response) =
     `, [req.userId]);
     ok(res, result.rows.map(mapRestaurant));
   } catch (err) {
-    console.error('favourites error:', err);
+    logger.error({ err }, 'favourites');
     fail(res, 500, 'SERVER_ERROR', 'Something went wrong.');
   }
 });

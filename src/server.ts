@@ -242,4 +242,86 @@ CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id, crea
 CREATE INDEX IF NOT EXISTS idx_favourites_user ON favourites(user_id);
 CREATE INDEX IF NOT EXISTS idx_reviews_restaurant ON restaurant_reviews(restaurant_id);
 CREATE INDEX IF NOT EXISTS idx_orders_status_updated ON orders(status, status_updated_at);
+
+-- Phase 11: account approval columns (idempotent)
+ALTER TABLE users ADD COLUMN IF NOT EXISTS approval_status VARCHAR(20) NOT NULL DEFAULT 'approved';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS approved_at TIMESTAMPTZ;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS approved_by UUID REFERENCES users(id);
+ALTER TABLE users ADD COLUMN IF NOT EXISTS suspension_reason TEXT;
+
+-- Phase 11: driver applications
+CREATE TABLE IF NOT EXISTS driver_applications (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id         UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  id_number       VARCHAR(20),
+  date_of_birth   DATE,
+  vehicle_type    VARCHAR(50),
+  vehicle_make    VARCHAR(100),
+  vehicle_model   VARCHAR(100),
+  vehicle_year    INT,
+  vehicle_reg     VARCHAR(50),
+  bank_name       VARCHAR(100),
+  bank_account_no VARCHAR(50),
+  bank_holder     VARCHAR(200),
+  bank_branch     VARCHAR(20),
+  status          VARCHAR(20) NOT NULL DEFAULT 'pending',
+  rejection_reason TEXT,
+  submitted_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  reviewed_at     TIMESTAMPTZ,
+  reviewed_by     UUID REFERENCES users(id),
+  UNIQUE(user_id)
+);
+
+-- Phase 11: restaurant applications
+CREATE TABLE IF NOT EXISTS restaurant_applications (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id         UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  trading_name    VARCHAR(200) NOT NULL,
+  business_reg_no VARCHAR(100),
+  cuisine_type    VARCHAR(100),
+  address         VARCHAR(500),
+  city            VARCHAR(200),
+  operating_hours JSONB,
+  bank_name       VARCHAR(100),
+  bank_account_no VARCHAR(50),
+  bank_holder     VARCHAR(200),
+  status          VARCHAR(20) NOT NULL DEFAULT 'pending',
+  rejection_reason TEXT,
+  submitted_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  reviewed_at     TIMESTAMPTZ,
+  reviewed_by     UUID REFERENCES users(id),
+  UNIQUE(user_id)
+);
+
+-- Phase 11: admin audit log
+CREATE TABLE IF NOT EXISTS admin_audit_log (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  admin_id    UUID REFERENCES users(id),
+  action      VARCHAR(100) NOT NULL,
+  target_type VARCHAR(50),
+  target_id   UUID,
+  notes       TEXT,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_driver_apps_status ON driver_applications(status);
+CREATE INDEX IF NOT EXISTS idx_restaurant_apps_status ON restaurant_applications(status);
+CREATE INDEX IF NOT EXISTS idx_admin_audit_admin ON admin_audit_log(admin_id, created_at DESC);
+
+-- Phase 12: loyalty system
+ALTER TABLE users ADD COLUMN IF NOT EXISTS loyalty_points_balance INT NOT NULL DEFAULT 0;
+
+CREATE TABLE IF NOT EXISTS loyalty_transactions (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id     UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  order_id    UUID REFERENCES orders(id),
+  points      INT NOT NULL,
+  type        VARCHAR(20) NOT NULL,
+  description TEXT,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_loyalty_user ON loyalty_transactions(user_id, created_at DESC);
+
+-- Phase 14: loyalty redemption
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS loyalty_points_redeemed INT NOT NULL DEFAULT 0;
 `;

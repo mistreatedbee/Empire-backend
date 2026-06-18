@@ -4,6 +4,13 @@ import { pool } from '../db';
 
 const router = Router();
 
+// Disable all seed routes in production
+if (process.env.NODE_ENV === 'production') {
+  router.use((_req: Request, res: Response) => {
+    res.status(404).json({ code: 'NOT_FOUND', message: 'Not found.' });
+  });
+}
+
 function requireSeedKey(req: Request, res: Response): boolean {
   const key = (req.body?.key as string) ?? (req.query?.key as string);
   if (!process.env.DEV_SEED_KEY || key !== process.env.DEV_SEED_KEY) {
@@ -24,15 +31,53 @@ router.post('/seed-driver', async (req: Request, res: Response) => {
 
     await pool.query('DELETE FROM users WHERE email = $1', [email]);
     const hash = await bcrypt.hash(password, 12);
-    await pool.query(
+    const userRes = await pool.query(
       `INSERT INTO users (first_name, last_name, email, phone, password_hash, role, is_verified)
-       VALUES ($1, $2, $3, $4, $5, 'driver', true)`,
+       VALUES ($1, $2, $3, $4, $5, 'driver', true)
+       RETURNING id`,
       ['Test', 'Driver', email, phone, hash]
+    );
+    const driverId = userRes.rows[0].id as string;
+    await pool.query(
+      `INSERT INTO drivers (id) VALUES ($1) ON CONFLICT (id) DO NOTHING`,
+      [driverId]
     );
 
     res.json({ success: true, data: { email, phone, password, role: 'driver' } });
   } catch (err) {
     console.error('seed-driver error:', err);
+    res.status(500).json({ code: 'SERVER_ERROR', message: 'Seed failed.' });
+  }
+});
+
+// POST /dev/seed-restaurant-owner — creates a restaurant owner account and links to first restaurant
+router.post('/seed-restaurant-owner', async (req: Request, res: Response) => {
+  try {
+    if (!requireSeedKey(req, res)) return;
+
+    const email = 'restaurant@empiredeliveries.co.za';
+    const phone = '+27800000003';
+    const password = 'Manager123!';
+
+    await pool.query('DELETE FROM users WHERE email = $1', [email]);
+    const hash = await bcrypt.hash(password, 12);
+    const userRes = await pool.query(
+      `INSERT INTO users (first_name, last_name, email, phone, password_hash, role, is_verified)
+       VALUES ($1, $2, $3, $4, $5, 'restaurant', true)
+       RETURNING id`,
+      ['Empire', 'Kitchen', email, phone, hash]
+    );
+    const ownerId = userRes.rows[0].id as string;
+
+    // Link to the first restaurant that has no owner
+    await pool.query(
+      `UPDATE restaurants SET owner_id = $1 WHERE owner_id IS NULL ORDER BY created_at ASC LIMIT 1`,
+      [ownerId]
+    );
+
+    res.json({ success: true, data: { email, phone, password, role: 'restaurant' } });
+  } catch (err) {
+    console.error('seed-restaurant-owner error:', err);
     res.status(500).json({ code: 'SERVER_ERROR', message: 'Seed failed.' });
   }
 });

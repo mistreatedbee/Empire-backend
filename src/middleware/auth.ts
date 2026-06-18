@@ -22,3 +22,33 @@ export function requireAuth(req: AuthRequest, res: Response, next: NextFunction)
     fail(res, 401, 'TOKEN_INVALID', 'Session expired. Please log in again.');
   }
 }
+
+export function requireDriver(req: AuthRequest, res: Response, next: NextFunction) {
+  requireAuth(req, res, () => {
+    if (req.userRole !== 'driver') {
+      fail(res, 403, 'FORBIDDEN', 'Driver access required.');
+      return;
+    }
+    next();
+  });
+}
+
+export function requireRestaurant(req: AuthRequest, res: Response, next: NextFunction) {
+  requireAuth(req, res, () => {
+    if (req.userRole !== 'restaurant') {
+      fail(res, 403, 'FORBIDDEN', 'Restaurant access required.');
+      return;
+    }
+    next();
+  });
+}
+
+export function requireAdmin(req: AuthRequest, res: Response, next: NextFunction) {
+  requireAuth(req, res, () => {
+    if (req.userRole !== 'admin') {
+      fail(res, 403, 'FORBIDDEN', 'Admin access required.');
+      return;
+    }
+    next();
+  });
+}
