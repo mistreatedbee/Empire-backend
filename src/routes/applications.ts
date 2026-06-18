@@ -116,7 +116,7 @@ router.post('/restaurant', requireAuth, async (req: AuthRequest, res: Response) 
     const {
       tradingName, businessRegNo, cuisineType, address, city, description,
       operatingHours, bankName, bankAccountNo, bankHolder,
-      minOrder, deliveryFee, deliveryRadius,
+      minOrder, deliveryFee, deliveryRadius, businessDocUrl,
     } = req.body as Record<string, string>;
 
     if (!tradingName?.trim()) {
@@ -128,12 +128,12 @@ router.post('/restaurant', requireAuth, async (req: AuthRequest, res: Response) 
       `INSERT INTO restaurant_applications
          (user_id, trading_name, business_reg_no, cuisine_type, address, city, description,
           operating_hours, bank_name, bank_account_no, bank_holder,
-          min_order, delivery_fee, delivery_radius)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+          min_order, delivery_fee, delivery_radius, business_doc_url)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
        ON CONFLICT (user_id) DO UPDATE SET
          trading_name=$2, business_reg_no=$3, cuisine_type=$4, address=$5, city=$6, description=$7,
          operating_hours=$8, bank_name=$9, bank_account_no=$10, bank_holder=$11,
-         min_order=$12, delivery_fee=$13, delivery_radius=$14,
+         min_order=$12, delivery_fee=$13, delivery_radius=$14, business_doc_url=$15,
          submitted_at=NOW(), status='pending'`,
       [
         userId, tradingName.trim(), businessRegNo ?? null, cuisineType ?? null,
@@ -143,6 +143,7 @@ router.post('/restaurant', requireAuth, async (req: AuthRequest, res: Response) 
         minOrder ? parseFloat(minOrder) : null,
         deliveryFee ? parseFloat(deliveryFee) : null,
         deliveryRadius ? parseFloat(deliveryRadius) : null,
+        businessDocUrl ?? null,
       ]
     );
 

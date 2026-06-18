@@ -316,6 +316,7 @@ ALTER TABLE restaurant_applications ADD COLUMN IF NOT EXISTS description TEXT;
 ALTER TABLE restaurant_applications ADD COLUMN IF NOT EXISTS min_order NUMERIC(10,2);
 ALTER TABLE restaurant_applications ADD COLUMN IF NOT EXISTS delivery_fee NUMERIC(10,2);
 ALTER TABLE restaurant_applications ADD COLUMN IF NOT EXISTS delivery_radius NUMERIC(10,2);
+ALTER TABLE restaurant_applications ADD COLUMN IF NOT EXISTS business_doc_url VARCHAR(500);
 
 -- Phase 12: loyalty system
 ALTER TABLE users ADD COLUMN IF NOT EXISTS loyalty_points_balance INT NOT NULL DEFAULT 0;

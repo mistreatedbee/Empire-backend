@@ -18,6 +18,7 @@ import driversRouter from './routes/drivers';
 import restaurantRouter from './routes/restaurant';
 import adminRouter from './routes/admin';
 import applicationsRouter from './routes/applications';
+import uploadsRouter from './routes/uploads';
 
 const app = express();
 
@@ -79,6 +80,7 @@ app.use('/drivers', driversRouter);
 app.use('/restaurant', restaurantRouter);
 app.use('/admin', adminRouter);
 app.use('/applications', applicationsRouter);
+app.use('/uploads', uploadsRouter);
 
 // ── Global error handler ──────────────────────────────────────────────────────
 app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
