@@ -61,11 +61,15 @@ router.put('/me', requireRestaurant, async (req: AuthRequest, res: Response) => 
       fail(res, 404, 'NOT_FOUND', 'No restaurant linked to this account.');
       return;
     }
-    const { name, address, deliveryFee, minOrder } = req.body as {
+    const { name, address, deliveryFee, minOrder, description, isOpen, deliveryTimeMin, deliveryTimeMax } = req.body as {
       name?: string;
       address?: string;
       deliveryFee?: number;
       minOrder?: number;
+      description?: string;
+      isOpen?: boolean;
+      deliveryTimeMin?: number;
+      deliveryTimeMax?: number;
     };
     if (!name?.trim()) {
       fail(res, 400, 'VALIDATION_ERROR', 'name is required.');
@@ -79,12 +83,26 @@ router.put('/me', requireRestaurant, async (req: AuthRequest, res: Response) => 
       fail(res, 400, 'VALIDATION_ERROR', 'minOrder must be a non-negative number.');
       return;
     }
+    if (deliveryTimeMin !== undefined && (isNaN(Number(deliveryTimeMin)) || Number(deliveryTimeMin) < 0)) {
+      fail(res, 400, 'VALIDATION_ERROR', 'deliveryTimeMin must be a non-negative number.');
+      return;
+    }
+    if (deliveryTimeMax !== undefined && (isNaN(Number(deliveryTimeMax)) || Number(deliveryTimeMax) < 0)) {
+      fail(res, 400, 'VALIDATION_ERROR', 'deliveryTimeMax must be a non-negative number.');
+      return;
+    }
     const result = await pool.query(
       `UPDATE restaurants
-         SET name=$1, address=$2, delivery_fee=$3, min_order=$4, updated_at=NOW()
-       WHERE id=$5
-       RETURNING id, name, address, delivery_fee, min_order`,
-      [name.trim(), address?.trim() ?? null, Number(deliveryFee ?? 0), Number(minOrder ?? 0), restaurantId]
+         SET name=$1, address=$2, delivery_fee=$3, min_order=$4, description=$5, is_open=$6,
+             delivery_time_min=$7, delivery_time_max=$8, updated_at=NOW()
+       WHERE id=$9
+       RETURNING id, name, address, delivery_fee, min_order, description, is_open, delivery_time_min, delivery_time_max`,
+      [
+        name.trim(), address?.trim() ?? null, Number(deliveryFee ?? 0), Number(minOrder ?? 0),
+        description?.trim() ?? null, isOpen ?? true,
+        Number(deliveryTimeMin ?? 0), Number(deliveryTimeMax ?? 0),
+        restaurantId,
+      ]
     );
     const r = result.rows[0];
     ok(res, {
@@ -93,6 +111,10 @@ router.put('/me', requireRestaurant, async (req: AuthRequest, res: Response) => 
       address: r.address,
       deliveryFee: parseFloat(String(r.delivery_fee)),
       minOrder: parseFloat(String(r.min_order)),
+      description: r.description,
+      isOpen: r.is_open,
+      deliveryTimeMin: r.delivery_time_min,
+      deliveryTimeMax: r.delivery_time_max,
     });
   } catch (err) {
     logger.error({ err }, 'PUT /restaurant/me');
@@ -259,15 +281,48 @@ router.get('/menu', requireRestaurant, async (req: AuthRequest, res: Response) =
       return;
     }
 
-    const result = await pool.query(
-      `SELECT mc.id AS cat_id, mc.name AS cat_name, mc.display_order,
-              mi.id, mi.name, mi.description, mi.price, mi.image, mi.is_available, mi.display_order AS item_order
-       FROM menu_categories mc
-       LEFT JOIN menu_items mi ON mi.menu_category_id = mc.id AND mi.restaurant_id = $1
-       WHERE mc.restaurant_id = $1
-       ORDER BY mc.display_order, mi.display_order`,
-      [restaurantId]
-    );
+    const [result, groupRows, addonRows] = await Promise.all([
+      pool.query(
+        `SELECT mc.id AS cat_id, mc.name AS cat_name, mc.display_order,
+                mi.id, mi.name, mi.description, mi.price, mi.image, mi.is_available, mi.display_order AS item_order
+         FROM menu_categories mc
+         LEFT JOIN menu_items mi ON mi.menu_category_id = mc.id AND mi.restaurant_id = $1
+         WHERE mc.restaurant_id = $1
+         ORDER BY mc.display_order, mi.display_order`,
+        [restaurantId]
+      ),
+      pool.query(
+        `SELECT ag.* FROM addon_groups ag
+         JOIN menu_items mi ON mi.id = ag.menu_item_id
+         WHERE mi.restaurant_id = $1`,
+        [restaurantId]
+      ),
+      pool.query(
+        `SELECT a.* FROM addons a
+         JOIN addon_groups ag ON ag.id = a.addon_group_id
+         JOIN menu_items mi ON mi.id = ag.menu_item_id
+         WHERE mi.restaurant_id = $1`,
+        [restaurantId]
+      ),
+    ]);
+
+    const addonsByGroup: Record<string, unknown[]> = {};
+    for (const a of addonRows.rows) {
+      const gid = a.addon_group_id as string;
+      if (!addonsByGroup[gid]) addonsByGroup[gid] = [];
+      addonsByGroup[gid].push({ id: a.id, name: a.name, price: parseFloat(String(a.price)) });
+    }
+    const groupsByItem: Record<string, unknown[]> = {};
+    for (const g of groupRows.rows) {
+      const mid = g.menu_item_id as string;
+      if (!groupsByItem[mid]) groupsByItem[mid] = [];
+      groupsByItem[mid].push({
+        id: g.id,
+        name: g.name,
+        required: Number(g.min_selections) >= 1,
+        addons: addonsByGroup[g.id as string] ?? [],
+      });
+    }
 
     const catMap: Record<string, { id: string; name: string; items: unknown[] }> = {};
     for (const row of result.rows) {
@@ -284,6 +339,7 @@ router.get('/menu', requireRestaurant, async (req: AuthRequest, res: Response) =
           isAvailable: row.is_available,
           categoryId: row.cat_id,
           categoryName: row.cat_name,
+          addonGroups: groupsByItem[row.id as string] ?? [],
         });
       }
     }
@@ -294,6 +350,32 @@ router.get('/menu', requireRestaurant, async (req: AuthRequest, res: Response) =
   }
 });
 
+// Replace all addon groups for a menu item with the given set.
+async function replaceAddonGroups(
+  itemId: string,
+  groups: Array<{ name: string; required?: boolean; addons: Array<{ name: string; price: number }> }>
+) {
+  await pool.query('DELETE FROM addon_groups WHERE menu_item_id=$1', [itemId]);
+  for (const g of groups) {
+    if (!g.name?.trim()) continue;
+    const minSel = g.required ? 1 : 0;
+    const maxSel = g.required ? 1 : Math.max(g.addons.length, 1);
+    const groupRes = await pool.query(
+      `INSERT INTO addon_groups (menu_item_id, name, min_selections, max_selections)
+       VALUES ($1,$2,$3,$4) RETURNING id`,
+      [itemId, g.name.trim(), minSel, maxSel]
+    );
+    const groupId = groupRes.rows[0].id as string;
+    for (const a of g.addons) {
+      if (!a.name?.trim()) continue;
+      await pool.query(
+        `INSERT INTO addons (addon_group_id, name, price) VALUES ($1,$2,$3)`,
+        [groupId, a.name.trim(), Number(a.price) || 0]
+      );
+    }
+  }
+}
+
 // POST /restaurant/menu/items
 router.post('/menu/items', requireRestaurant, async (req: AuthRequest, res: Response) => {
   try {
@@ -302,7 +384,7 @@ router.post('/menu/items', requireRestaurant, async (req: AuthRequest, res: Resp
       fail(res, 404, 'NOT_FOUND', 'No restaurant linked to this account.');
       return;
     }
-    const { name, description, price, imageUrl, categoryId, isAvailable } = req.body;
+    const { name, description, price, imageUrl, categoryId, isAvailable, addonGroups } = req.body;
     if (!name || price == null || !categoryId) {
       fail(res, 400, 'VALIDATION_ERROR', 'name, price and categoryId are required.');
       return;
@@ -323,6 +405,11 @@ router.post('/menu/items', requireRestaurant, async (req: AuthRequest, res: Resp
       [categoryId, restaurantId, name, description ?? null, price, imageUrl ?? null, isAvailable !== false]
     );
     const item = result.rows[0];
+
+    if (Array.isArray(addonGroups) && addonGroups.length > 0) {
+      await replaceAddonGroups(item.id as string, addonGroups);
+    }
+
     ok(res, {
       id: item.id,
       name: item.name,
@@ -345,7 +432,7 @@ router.put('/menu/items/:id', requireRestaurant, async (req: AuthRequest, res: R
       fail(res, 404, 'NOT_FOUND', 'No restaurant linked to this account.');
       return;
     }
-    const { name, description, price, imageUrl, categoryId, isAvailable } = req.body;
+    const { name, description, price, imageUrl, categoryId, isAvailable, addonGroups } = req.body;
     const result = await pool.query(
       `UPDATE menu_items SET
          name          = COALESCE($1, name),
@@ -363,6 +450,11 @@ router.put('/menu/items/:id', requireRestaurant, async (req: AuthRequest, res: R
       return;
     }
     const item = result.rows[0];
+
+    if (Array.isArray(addonGroups)) {
+      await replaceAddonGroups(item.id as string, addonGroups);
+    }
+
     ok(res, {
       id: item.id,
       name: item.name,
