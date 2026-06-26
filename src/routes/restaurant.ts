@@ -71,8 +71,8 @@ router.put('/me', requireRestaurant, async (req: AuthRequest, res: Response) => 
       deliveryTimeMin?: number;
       deliveryTimeMax?: number;
     };
-    if (!name?.trim()) {
-      fail(res, 400, 'VALIDATION_ERROR', 'name is required.');
+    if (name !== undefined && !name.trim()) {
+      fail(res, 400, 'VALIDATION_ERROR', 'name cannot be empty.');
       return;
     }
     if (deliveryFee !== undefined && (isNaN(Number(deliveryFee)) || Number(deliveryFee) < 0)) {
@@ -91,16 +91,21 @@ router.put('/me', requireRestaurant, async (req: AuthRequest, res: Response) => 
       fail(res, 400, 'VALIDATION_ERROR', 'deliveryTimeMax must be a non-negative number.');
       return;
     }
+    // Partial update: any field omitted from the body keeps its existing DB value.
     const result = await pool.query(
       `UPDATE restaurants
-         SET name=$1, address=$2, delivery_fee=$3, min_order=$4, description=$5, is_open=$6,
-             delivery_time_min=$7, delivery_time_max=$8, updated_at=NOW()
+         SET name=COALESCE($1, name), address=COALESCE($2, address),
+             delivery_fee=COALESCE($3, delivery_fee), min_order=COALESCE($4, min_order),
+             description=COALESCE($5, description), is_open=COALESCE($6, is_open),
+             delivery_time_min=COALESCE($7, delivery_time_min), delivery_time_max=COALESCE($8, delivery_time_max),
+             updated_at=NOW()
        WHERE id=$9
        RETURNING id, name, address, delivery_fee, min_order, description, is_open, delivery_time_min, delivery_time_max`,
       [
-        name.trim(), address?.trim() ?? null, Number(deliveryFee ?? 0), Number(minOrder ?? 0),
-        description?.trim() ?? null, isOpen ?? true,
-        Number(deliveryTimeMin ?? 0), Number(deliveryTimeMax ?? 0),
+        name?.trim() ?? null, address?.trim() ?? null,
+        deliveryFee !== undefined ? Number(deliveryFee) : null, minOrder !== undefined ? Number(minOrder) : null,
+        description !== undefined ? description.trim() : null, isOpen !== undefined ? isOpen : null,
+        deliveryTimeMin !== undefined ? Number(deliveryTimeMin) : null, deliveryTimeMax !== undefined ? Number(deliveryTimeMax) : null,
         restaurantId,
       ]
     );
@@ -346,6 +351,124 @@ router.get('/menu', requireRestaurant, async (req: AuthRequest, res: Response) =
     ok(res, Object.values(catMap));
   } catch (err) {
     logger.error({ err }, 'GET /restaurant/menu');
+    fail(res, 500, 'SERVER_ERROR', 'Something went wrong.');
+  }
+});
+
+// POST /restaurant/menu/categories
+router.post('/menu/categories', requireRestaurant, async (req: AuthRequest, res: Response) => {
+  try {
+    const restaurantId = await getMyRestaurant(req.userId!);
+    if (!restaurantId) {
+      fail(res, 404, 'NOT_FOUND', 'No restaurant linked to this account.');
+      return;
+    }
+    const { name } = req.body as { name?: string };
+    if (!name?.trim()) {
+      fail(res, 400, 'VALIDATION_ERROR', 'name is required.');
+      return;
+    }
+    const maxOrder = await pool.query(
+      'SELECT COALESCE(MAX(display_order), -1) AS max_order FROM menu_categories WHERE restaurant_id=$1',
+      [restaurantId]
+    );
+    const result = await pool.query(
+      `INSERT INTO menu_categories (restaurant_id, name, display_order) VALUES ($1,$2,$3) RETURNING id, name, display_order`,
+      [restaurantId, name.trim(), Number(maxOrder.rows[0].max_order) + 1]
+    );
+    const cat = result.rows[0];
+    ok(res, { id: cat.id, name: cat.name, displayOrder: cat.display_order }, undefined, 201);
+  } catch (err) {
+    logger.error({ err }, 'POST /restaurant/menu/categories');
+    fail(res, 500, 'SERVER_ERROR', 'Something went wrong.');
+  }
+});
+
+// PUT /restaurant/menu/categories/reorder — { order: string[] } category ids in desired order
+// Registered before the /:id route below since Express matches path patterns in
+// registration order and "reorder" would otherwise be captured as an :id.
+router.put('/menu/categories/reorder', requireRestaurant, async (req: AuthRequest, res: Response) => {
+  try {
+    const restaurantId = await getMyRestaurant(req.userId!);
+    if (!restaurantId) {
+      fail(res, 404, 'NOT_FOUND', 'No restaurant linked to this account.');
+      return;
+    }
+    const { order } = req.body as { order?: string[] };
+    if (!Array.isArray(order) || order.length === 0) {
+      fail(res, 400, 'VALIDATION_ERROR', 'order must be a non-empty array of category ids.');
+      return;
+    }
+    for (let i = 0; i < order.length; i++) {
+      await pool.query(
+        'UPDATE menu_categories SET display_order=$1 WHERE id=$2 AND restaurant_id=$3',
+        [i, order[i], restaurantId]
+      );
+    }
+    ok(res, { success: true });
+  } catch (err) {
+    logger.error({ err }, 'PUT /restaurant/menu/categories/reorder');
+    fail(res, 500, 'SERVER_ERROR', 'Something went wrong.');
+  }
+});
+
+// PUT /restaurant/menu/categories/:id — rename
+router.put('/menu/categories/:id', requireRestaurant, async (req: AuthRequest, res: Response) => {
+  try {
+    const restaurantId = await getMyRestaurant(req.userId!);
+    if (!restaurantId) {
+      fail(res, 404, 'NOT_FOUND', 'No restaurant linked to this account.');
+      return;
+    }
+    const { name } = req.body as { name?: string };
+    if (!name?.trim()) {
+      fail(res, 400, 'VALIDATION_ERROR', 'name is required.');
+      return;
+    }
+    const result = await pool.query(
+      `UPDATE menu_categories SET name=$1 WHERE id=$2 AND restaurant_id=$3 RETURNING id, name, display_order`,
+      [name.trim(), req.params.id, restaurantId]
+    );
+    if (!result.rows.length) {
+      fail(res, 404, 'NOT_FOUND', 'Category not found.');
+      return;
+    }
+    const cat = result.rows[0];
+    ok(res, { id: cat.id, name: cat.name, displayOrder: cat.display_order });
+  } catch (err) {
+    logger.error({ err }, 'PUT /restaurant/menu/categories/:id');
+    fail(res, 500, 'SERVER_ERROR', 'Something went wrong.');
+  }
+});
+
+// DELETE /restaurant/menu/categories/:id — refuses if the category still has items
+router.delete('/menu/categories/:id', requireRestaurant, async (req: AuthRequest, res: Response) => {
+  try {
+    const restaurantId = await getMyRestaurant(req.userId!);
+    if (!restaurantId) {
+      fail(res, 404, 'NOT_FOUND', 'No restaurant linked to this account.');
+      return;
+    }
+    const catCheck = await pool.query(
+      'SELECT id FROM menu_categories WHERE id=$1 AND restaurant_id=$2',
+      [req.params.id, restaurantId]
+    );
+    if (!catCheck.rows.length) {
+      fail(res, 404, 'NOT_FOUND', 'Category not found.');
+      return;
+    }
+    const itemCount = await pool.query(
+      'SELECT COUNT(*) AS count FROM menu_items WHERE menu_category_id=$1',
+      [req.params.id]
+    );
+    if (Number(itemCount.rows[0].count) > 0) {
+      fail(res, 400, 'VALIDATION_ERROR', 'Move or delete all items in this category first.');
+      return;
+    }
+    await pool.query('DELETE FROM menu_categories WHERE id=$1 AND restaurant_id=$2', [req.params.id, restaurantId]);
+    ok(res, { id: req.params.id });
+  } catch (err) {
+    logger.error({ err }, 'DELETE /restaurant/menu/categories/:id');
     fail(res, 500, 'SERVER_ERROR', 'Something went wrong.');
   }
 });
