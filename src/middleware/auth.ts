@@ -37,15 +37,20 @@ export async function requireAuth(req: AuthRequest, res: Response, next: NextFun
   }
 
   const row = await pool.query(
-    'SELECT id, role FROM users WHERE email = $1',
+    'SELECT id, role, subscription_expires_at FROM users WHERE email = $1',
     [insforgeUser.email]
   );
   if (!row.rows.length) {
     fail(res, 401, 'USER_NOT_FOUND', 'Account not found. Please sign up.');
     return;
   }
-  req.userId = row.rows[0].id as string;
-  req.userRole = row.rows[0].role as string;
+  const { id, role, subscription_expires_at } = row.rows[0];
+  if (role !== 'admin' && subscription_expires_at && new Date(subscription_expires_at) < new Date()) {
+    fail(res, 403, 'SUBSCRIPTION_EXPIRED', 'Your access has expired. Please renew to continue.');
+    return;
+  }
+  req.userId = id as string;
+  req.userRole = role as string;
   next();
 }
 

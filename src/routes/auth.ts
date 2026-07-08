@@ -81,7 +81,8 @@ router.get('/me', requireAuth, async (req: AuthRequest, res: Response) => {
   try {
     const row = await pool.query(
       `SELECT id, first_name, last_name, email, phone, role, profile_image,
-              is_verified, approval_status, suspension_reason, created_at, updated_at
+              is_verified, approval_status, suspension_reason, subscription_expires_at,
+              created_at, updated_at
        FROM users WHERE id = $1`,
       [req.userId]
     );
@@ -122,6 +123,7 @@ function mapUser(row: Record<string, unknown>) {
     profileImage: (row.profile_image ?? null) as string | null,
     approvalStatus: (row.approval_status ?? 'approved') as string,
     suspensionReason: (row.suspension_reason ?? null) as string | null,
+    subscriptionExpiresAt: (row.subscription_expires_at ?? null) as string | null,
     createdAt: row.created_at as string,
     updatedAt: row.updated_at as string,
   };

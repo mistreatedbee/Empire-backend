@@ -299,7 +299,8 @@ router.get('/users', async (req: AuthRequest, res: Response) => {
 
     const [dataRes, countRes] = await Promise.all([
       pool.query(
-        `SELECT id, first_name, last_name, email, phone, role, approval_status, is_verified, created_at
+        `SELECT id, first_name, last_name, email, phone, role, approval_status, is_verified,
+                subscription_expires_at, created_at
          FROM users ${where} ORDER BY created_at DESC LIMIT $2 OFFSET $3`,
         params
       ),
@@ -316,6 +317,7 @@ router.get('/users', async (req: AuthRequest, res: Response) => {
         role: u.role,
         approvalStatus: u.approval_status,
         isVerified: u.is_verified,
+        subscriptionExpiresAt: u.subscription_expires_at,
         createdAt: u.created_at,
       })),
       total: parseInt(countRes.rows[0].count as string, 10),
@@ -372,6 +374,34 @@ router.put('/users/:id/reactivate', async (req: AuthRequest, res: Response) => {
     ok(res, { reactivated: true });
   } catch (err) {
     logger.error({ err }, 'PUT /admin/users/:id/reactivate');
+    fail(res, 500, 'SERVER_ERROR', 'Something went wrong.');
+  }
+});
+
+// PUT /admin/users/:id/subscription
+// Body: { expiresAt: ISO date string | null }. Null clears the expiry (unrestricted access).
+router.put('/users/:id/subscription', async (req: AuthRequest, res: Response) => {
+  try {
+    const { expiresAt } = req.body as { expiresAt?: string | null };
+    if (expiresAt != null && Number.isNaN(Date.parse(expiresAt))) {
+      fail(res, 400, 'INVALID_DATE', 'expiresAt must be a valid ISO date string or null.');
+      return;
+    }
+    const result = await pool.query(
+      `UPDATE users SET subscription_expires_at=$2 WHERE id=$1 RETURNING id`,
+      [req.params.id, expiresAt ?? null]
+    );
+    if (!result.rows.length) {
+      fail(res, 404, 'NOT_FOUND', 'User not found.');
+      return;
+    }
+    await pool.query(
+      `INSERT INTO admin_audit_log (admin_id, action, target_type, target_id, notes) VALUES ($1,'set_subscription_expiry','users',$2,$3)`,
+      [req.userId, req.params.id, expiresAt ?? 'cleared']
+    );
+    ok(res, { subscriptionExpiresAt: expiresAt ?? null });
+  } catch (err) {
+    logger.error({ err }, 'PUT /admin/users/:id/subscription');
     fail(res, 500, 'SERVER_ERROR', 'Something went wrong.');
   }
 });

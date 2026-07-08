@@ -16,6 +16,8 @@ const SCHEMA_PATCHES = [
   // Add approval_status + suspension_reason to users if not already present
   `ALTER TABLE public.users ADD COLUMN IF NOT EXISTS approval_status VARCHAR(20) NOT NULL DEFAULT 'approved'`,
   `ALTER TABLE public.users ADD COLUMN IF NOT EXISTS suspension_reason TEXT`,
+  // NULL = no expiry restriction; set to time-box a client's access (e.g. 1-month trial)
+  `ALTER TABLE public.users ADD COLUMN IF NOT EXISTS subscription_expires_at TIMESTAMPTZ`,
 ];
 
 const RLS_TABLES = [
