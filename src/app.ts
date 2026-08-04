@@ -25,9 +25,19 @@ const app = express();
 // ── Security ──────────────────────────────────────────────────────────────────
 app.use(helmet());
 
-const allowedOrigins = (process.env.ALLOWED_ORIGINS ?? '*').split(',').map((o) => o.trim());
+// Falls back to the known production web origins (landing site + its web admin
+// panel) rather than '*' when ALLOWED_ORIGINS isn't set on the host, so the
+// browser-based admin panel works out of the box without relying on an env var
+// being configured correctly on every deploy target.
+const DEFAULT_ALLOWED_ORIGINS = [
+  'https://empiredeliveries.co.za',
+  'https://www.empiredeliveries.co.za',
+];
+const allowedOrigins = process.env.ALLOWED_ORIGINS
+  ? process.env.ALLOWED_ORIGINS.split(',').map((o) => o.trim())
+  : DEFAULT_ALLOWED_ORIGINS;
 app.use(cors({
-  origin: allowedOrigins.length === 1 && allowedOrigins[0] === '*' ? '*' : allowedOrigins,
+  origin: allowedOrigins,
   credentials: true,
 }));
 
