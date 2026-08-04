@@ -334,4 +334,10 @@ CREATE INDEX IF NOT EXISTS idx_loyalty_user ON loyalty_transactions(user_id, cre
 
 -- Phase 14: loyalty redemption
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS loyalty_points_redeemed INT NOT NULL DEFAULT 0;
+
+-- Phase 15: subscription expiry (requireAuth reads this on every authenticated
+-- request — was only ever added to the standalone db/patch.ts script, which was
+-- never run against production, so every authenticated request crashed the
+-- process with "column subscription_expires_at does not exist".
+ALTER TABLE users ADD COLUMN IF NOT EXISTS subscription_expires_at TIMESTAMPTZ;
 `;
