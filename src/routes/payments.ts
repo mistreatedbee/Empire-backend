@@ -17,6 +17,26 @@ const MERCHANT_KEY = process.env.PAYFAST_MERCHANT_KEY ?? '46f0cd694581a';
 const PASSPHRASE = process.env.PAYFAST_PASSPHRASE ?? 'jt7NOE43FZPn';
 const BACKEND_URL = process.env.BACKEND_URL ?? 'https://empire-backend-8066.onrender.com';
 
+// Gateways (PayFast, Ozow, Peach) validate that return/cancel/notify URLs are real
+// http(s) URLs and reject a custom app scheme like `empire://...` outright — this is
+// what was causing PayFast to come back with "bad request" instead of the payment
+// form. Point the gateway at this HTTPS bridge instead; it 302s straight into the
+// app's deep link once the browser lands back on our own domain.
+function bridgeUrl(deepLink: string): string {
+  return `${BACKEND_URL}/payments/redirect?to=${encodeURIComponent(deepLink)}`;
+}
+
+// GET /payments/redirect?to=empire://... — HTTPS landing page gateways redirect to,
+// which immediately bounces into the app via its custom URI scheme.
+router.get('/redirect', (req: Request, res: Response) => {
+  const to = typeof req.query.to === 'string' ? req.query.to : '';
+  if (!to.startsWith('empire://')) {
+    res.status(400).send('Invalid redirect target');
+    return;
+  }
+  res.redirect(302, to);
+});
+
 // ─── PayFast ──────────────────────────────────────────────────────────────────
 
 // POST /payments/payfast/initiate
@@ -48,8 +68,8 @@ router.post('/payfast/initiate', requireAuth, async (req: AuthRequest, res: Resp
     const params: Record<string, string> = {
       merchant_id: MERCHANT_ID,
       merchant_key: MERCHANT_KEY,
-      return_url: 'empire://payment-success',
-      cancel_url: 'empire://payment-cancel',
+      return_url: bridgeUrl('empire://payment-success'),
+      cancel_url: bridgeUrl('empire://payment-cancel'),
       notify_url: `${BACKEND_URL}/payments/payfast/notify`,
       name_first: order.first_name as string,
       name_last: order.last_name as string,
@@ -195,8 +215,8 @@ router.post('/wallet/topup', requireAuth, async (req: AuthRequest, res: Response
     const params: Record<string, string> = {
       merchant_id: MERCHANT_ID,
       merchant_key: MERCHANT_KEY,
-      return_url: 'empire://wallet-topup-success',
-      cancel_url: 'empire://wallet-topup-cancel',
+      return_url: bridgeUrl('empire://wallet-topup-success'),
+      cancel_url: bridgeUrl('empire://wallet-topup-cancel'),
       notify_url: `${BACKEND_URL}/payments/payfast/notify`,
       name_first: u.first_name as string,
       name_last: u.last_name as string,
@@ -322,9 +342,9 @@ router.post('/ozow/initiate', requireAuth, async (req: AuthRequest, res: Respons
     }
 
     const amount = parseFloat(String(orderRow.rows[0].total)).toFixed(2);
-    const successUrl = 'empire://payment-success';
-    const cancelUrl = 'empire://payment-cancel';
-    const errorUrl = 'empire://payment-cancel';
+    const successUrl = bridgeUrl('empire://payment-success');
+    const cancelUrl = bridgeUrl('empire://payment-cancel');
+    const errorUrl = bridgeUrl('empire://payment-cancel');
     const notifyUrl = `${BACKEND_URL}/payments/ozow/notify`;
     const isTest = OZOW_IS_TEST ? 'true' : 'false';
 
@@ -461,7 +481,7 @@ router.post('/peach/initiate', requireAuth, async (req: AuthRequest, res: Respon
       r.end();
     });
 
-    const shopperResultUrl = 'empire://payment-success';
+    const shopperResultUrl = bridgeUrl('empire://payment-success');
     ok(res, {
       checkoutId,
       shopperResultUrl,
