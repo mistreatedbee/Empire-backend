@@ -340,4 +340,29 @@ ALTER TABLE orders ADD COLUMN IF NOT EXISTS loyalty_points_redeemed INT NOT NULL
 -- never run against production, so every authenticated request crashed the
 -- process with "column subscription_expires_at does not exist".
 ALTER TABLE users ADD COLUMN IF NOT EXISTS subscription_expires_at TIMESTAMPTZ;
+
+CREATE TABLE IF NOT EXISTS pricing_rules (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name VARCHAR(100) NOT NULL DEFAULT 'default',
+  is_active BOOLEAN NOT NULL DEFAULT true,
+  base_fee NUMERIC(10,2) NOT NULL DEFAULT 20,
+  included_km NUMERIC(5,2) NOT NULL DEFAULT 3,
+  mid_km_rate NUMERIC(10,2) NOT NULL DEFAULT 5,
+  mid_km_until NUMERIC(5,2) NOT NULL DEFAULT 7,
+  long_km_rate NUMERIC(10,2) NOT NULL DEFAULT 7,
+  service_fee_pct NUMERIC(6,4) NOT NULL DEFAULT 0.05,
+  small_order_threshold NUMERIC(10,2) NOT NULL DEFAULT 100,
+  small_order_fee NUMERIC(10,2) NOT NULL DEFAULT 10,
+  peak_multiplier NUMERIC(4,2) NOT NULL DEFAULT 1.0,
+  driver_share_pct NUMERIC(6,4) NOT NULL DEFAULT 0.75,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+INSERT INTO pricing_rules (name, is_active)
+SELECT 'default', true
+WHERE NOT EXISTS (SELECT 1 FROM pricing_rules WHERE name = 'default');
+
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS small_order_fee NUMERIC(10,2) NOT NULL DEFAULT 0;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS distance_km NUMERIC(8,2);
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS estimated_delivery_minutes INTEGER;
 `;

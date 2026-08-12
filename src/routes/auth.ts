@@ -1,5 +1,6 @@
 import { logger } from '../utils/logger';
 import { Router, Request, Response } from 'express';
+import { randomUUID } from 'crypto';
 import { pool } from '../db';
 import { requireAuth, AuthRequest } from '../middleware/auth';
 import { ok, fail } from '../utils/response';
@@ -7,6 +8,11 @@ import { ok, fail } from '../utils/response';
 const router = Router();
 
 const INSFORGE_URL = process.env.INSFORGE_URL ?? 'https://mnf8bzhv.us-east.insforge.app';
+
+function placeholderPhone(email: string): string {
+  const local = email.split('@')[0]?.replace(/\W/g, '').slice(0, 8) || 'user';
+  return `ig${local}${randomUUID().replace(/-/g, '').slice(0, 6)}`.slice(0, 20);
+}
 
 // POST /auth/sync
 // Called after InsForge email verification to create/return our user record.
@@ -48,6 +54,7 @@ router.post('/sync', async (req: Request, res: Response) => {
     const allowedRoles = ['customer', 'driver', 'restaurant'];
     const userRole = allowedRoles.includes(role ?? '') ? role! : 'customer';
     const approvalStatus = userRole === 'customer' ? 'approved' : 'pending';
+    const phoneValue = (phone ?? '').trim() || placeholderPhone(email);
 
     const result = await pool.query(
       `INSERT INTO users
@@ -58,7 +65,7 @@ router.post('/sync', async (req: Request, res: Response) => {
         (firstName ?? '').trim(),
         (lastName ?? '').trim(),
         email,
-        phone ?? '',
+        phoneValue,
         'insforge_managed',
         userRole,
         approvalStatus,

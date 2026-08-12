@@ -34,8 +34,7 @@ const upload = multer({
   },
 });
 
-// POST /uploads — proxy a file to InsForge Storage and return its public URL
-router.post('/', requireAuth, upload.single('file'), async (req: AuthRequest, res: Response) => {
+async function storeUpload(req: AuthRequest, res: Response, folder: string) {
   try {
     const file = req.file;
     if (!file) {
@@ -43,7 +42,11 @@ router.post('/', requireAuth, upload.single('file'), async (req: AuthRequest, re
       return;
     }
 
-    const folder = (req.body.folder as string | undefined)?.trim() || 'misc';
+    if (!INSFORGE_API_KEY) {
+      fail(res, 503, 'NOT_CONFIGURED', 'Image storage is not configured on the server.');
+      return;
+    }
+
     const safeName = file.originalname.replace(/[^a-zA-Z0-9._-]/g, '_');
     const key = `${folder}/${req.userId}/${uuidv4()}-${safeName}`;
 
@@ -69,12 +72,24 @@ router.post('/', requireAuth, upload.single('file'), async (req: AuthRequest, re
     ok(res, { url });
   } catch (err) {
     if (err instanceof Error && err.message === 'UNSUPPORTED_FILE_TYPE') {
-      fail(res, 400, 'UNSUPPORTED_FILE_TYPE', 'Please upload a photo, PDF, or Word document.');
+      fail(res, 400, 'UNSUPPORTED_FILE_TYPE', 'Please upload a JPEG, PNG, or WebP image.');
       return;
     }
     logger.error({ err }, 'POST /uploads');
     fail(res, 500, 'SERVER_ERROR', 'Something went wrong. Please try again.');
   }
+}
+
+// POST /uploads — documents and general files
+router.post('/', requireAuth, upload.single('file'), (req, res) => {
+  const folder = (req.body.folder as string | undefined)?.trim() || 'misc';
+  return storeUpload(req, res, folder);
+});
+
+// POST /uploads/image — menu items, restaurant branding
+router.post('/image', requireAuth, upload.single('file'), (req, res) => {
+  const folder = (req.body.folder as string | undefined)?.trim() || 'menu-images';
+  return storeUpload(req, res, folder);
 });
 
 export default router;

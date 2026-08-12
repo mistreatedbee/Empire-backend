@@ -4,6 +4,7 @@ import { pool } from '../db';
 import { requireAuth, AuthRequest } from '../middleware/auth';
 import { ok, fail } from '../utils/response';
 import { sendPushToUser } from '../utils/push';
+import { quoteOrder } from '../utils/orderPricing';
 
 const router = Router();
 
@@ -18,10 +19,106 @@ async function insertNotification(userId: string, type: string, title: string, b
   }
 }
 
+// POST /orders/quote — transparent pricing before checkout
+router.post('/quote', requireAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const {
+      restaurantId,
+      items,
+      deliveryAddressId,
+      couponCode,
+      loyaltyPointsToRedeem,
+      deliveryLatitude,
+      deliveryLongitude,
+      restaurantLatitude,
+      restaurantLongitude,
+    } = req.body as {
+      restaurantId?: string;
+      items?: Array<{ menuItemId: string; quantity: number; addonIds?: string[] }>;
+      deliveryAddressId?: string;
+      couponCode?: string;
+      loyaltyPointsToRedeem?: number;
+      deliveryLatitude?: number;
+      deliveryLongitude?: number;
+      restaurantLatitude?: number;
+      restaurantLongitude?: number;
+    };
+
+    if (!restaurantId || !items?.length) {
+      fail(res, 400, 'VALIDATION_ERROR', 'restaurantId and items are required.');
+      return;
+    }
+
+    const restRow = await pool.query('SELECT id FROM restaurants WHERE id=$1', [restaurantId]);
+    if (!restRow.rows.length) {
+      fail(res, 404, 'NOT_FOUND', 'Restaurant not found.');
+      return;
+    }
+
+    if (deliveryAddressId) {
+      const addrRow = await pool.query(
+        'SELECT id FROM user_addresses WHERE id=$1 AND user_id=$2',
+        [deliveryAddressId, req.userId],
+      );
+      if (!addrRow.rows.length) {
+        fail(res, 404, 'NOT_FOUND', 'Delivery address not found.');
+        return;
+      }
+    }
+
+    const quote = await quoteOrder(pool, {
+      restaurantId,
+      items,
+      deliveryAddressId,
+      userId: req.userId,
+      couponCode,
+      loyaltyPointsToRedeem,
+      deliveryLatitude,
+      deliveryLongitude,
+      restaurantLatitude,
+      restaurantLongitude,
+    });
+
+    ok(res, {
+      subtotal: quote.subtotal,
+      deliveryFee: quote.deliveryFee,
+      serviceFee: quote.serviceFee,
+      smallOrderFee: quote.smallOrderFee,
+      discount: quote.discount,
+      loyaltyDiscount: quote.loyaltyDiscount,
+      total: quote.total,
+      distanceKm: quote.distanceKm,
+      estimatedDeliveryMinutes: quote.estimatedDeliveryMinutes,
+      breakdown: quote.breakdown,
+      driverPayout: quote.driverPayout,
+      addressRequired: !deliveryAddressId,
+    });
+  } catch (err) {
+    if (err instanceof Error && err.message.includes('not found')) {
+      fail(res, 400, 'VALIDATION_ERROR', err.message);
+      return;
+    }
+    logger.error({ err }, 'order quote');
+    fail(res, 500, 'SERVER_ERROR', 'Something went wrong.');
+  }
+});
+
 // POST /orders
 router.post('/', requireAuth, async (req: AuthRequest, res: Response) => {
   try {
-    const { restaurantId, items, deliveryAddressId, paymentMethod, couponCode, deliveryNotes, loyaltyPointsToRedeem: rawLoyaltyPts } = req.body;
+    const {
+      restaurantId,
+      items,
+      deliveryAddressId,
+      paymentMethod,
+      couponCode,
+      deliveryNotes,
+      loyaltyPointsToRedeem: rawLoyaltyPts,
+      deliveryLatitude,
+      deliveryLongitude,
+      restaurantLatitude,
+      restaurantLongitude,
+    } = req.body;
 
     if (!restaurantId || !items?.length || !deliveryAddressId || !paymentMethod) {
       fail(res, 400, 'VALIDATION_ERROR', 'restaurantId, items, deliveryAddressId and paymentMethod are required.');
@@ -30,85 +127,31 @@ router.post('/', requireAuth, async (req: AuthRequest, res: Response) => {
 
     const client = await pool.connect();
     try {
-      // Verify restaurant exists
-      const restRow = await client.query('SELECT id, name, delivery_fee FROM restaurants WHERE id=$1', [restaurantId]);
+      await client.query('BEGIN');
+
+      const restRow = await client.query('SELECT id, name FROM restaurants WHERE id=$1', [restaurantId]);
       if (!restRow.rows.length) {
+        await client.query('ROLLBACK');
         fail(res, 404, 'NOT_FOUND', 'Restaurant not found.');
         return;
       }
-      const deliveryFee = parseFloat(restRow.rows[0].delivery_fee);
       const restaurantName = restRow.rows[0].name as string;
 
-      // Verify address belongs to user
       const addrRow = await client.query(
         'SELECT id FROM user_addresses WHERE id=$1 AND user_id=$2',
-        [deliveryAddressId, req.userId]
+        [deliveryAddressId, req.userId],
       );
       if (!addrRow.rows.length) {
+        await client.query('ROLLBACK');
         fail(res, 404, 'NOT_FOUND', 'Delivery address not found.');
         return;
       }
 
-      // Resolve menu item prices
-      let subtotal = 0;
-      const resolvedItems: { menuItemId: string; quantity: number; unitPrice: number; addonIds: string[]; instructions?: string }[] = [];
-
-      for (const item of items as { menuItemId: string; quantity: number; addonIds?: string[]; instructions?: string }[]) {
-        const itemRow = await client.query(
-          'SELECT id, price FROM menu_items WHERE id=$1 AND restaurant_id=$2 AND is_available=true',
-          [item.menuItemId, restaurantId]
-        );
-        if (!itemRow.rows.length) {
-          fail(res, 400, 'VALIDATION_ERROR', `Menu item ${item.menuItemId} not found or unavailable.`);
-          return;
-        }
-        let unitPrice = parseFloat(itemRow.rows[0].price);
-
-        // Add addon prices
-        if (item.addonIds?.length) {
-          const addonRows = await client.query(
-            'SELECT price FROM addons WHERE id = ANY($1)',
-            [item.addonIds]
-          );
-          for (const a of addonRows.rows) unitPrice += parseFloat(a.price);
-        }
-
-        subtotal += unitPrice * item.quantity;
-        resolvedItems.push({ menuItemId: item.menuItemId, quantity: item.quantity, unitPrice, addonIds: item.addonIds ?? [], instructions: item.instructions });
-      }
-
-      const serviceFee = Math.round(subtotal * 0.05 * 100) / 100;
-      let discount = 0;
-      if (couponCode) {
-        const couponRow = await client.query(
-          `SELECT discount_type, discount_value, max_discount, min_order, is_active, expires_at, max_uses, uses_count
-           FROM coupons WHERE code = $1`,
-          [(couponCode as string).trim().toUpperCase()]
-        );
-        const c = couponRow.rows[0];
-        if (
-          c && c.is_active &&
-          (!c.expires_at || new Date(c.expires_at) >= new Date()) &&
-          (c.max_uses === null || c.uses_count < c.max_uses) &&
-          subtotal >= parseFloat(c.min_order)
-        ) {
-          discount = c.discount_type === 'percentage'
-            ? Math.min(subtotal * parseFloat(c.discount_value) / 100, c.max_discount ? parseFloat(c.max_discount) : Infinity)
-            : parseFloat(c.discount_value);
-          discount = Math.round(discount * 100) / 100;
-          await client.query(
-            'UPDATE coupons SET uses_count = uses_count + 1 WHERE code = $1',
-            [(couponCode as string).trim().toUpperCase()]
-          );
-        }
-      }
-      // Loyalty redemption (must be multiple of 100)
       const loyaltyPts = typeof rawLoyaltyPts === 'number' ? Math.floor(rawLoyaltyPts / 100) * 100 : 0;
-      let loyaltyDiscount = 0;
       if (loyaltyPts > 0) {
         const balRes = await client.query(
           `SELECT loyalty_points_balance FROM users WHERE id=$1 FOR UPDATE`,
-          [req.userId]
+          [req.userId],
         );
         const balance: number = balRes.rows[0]?.loyalty_points_balance ?? 0;
         if (loyaltyPts > balance) {
@@ -116,20 +159,65 @@ router.post('/', requireAuth, async (req: AuthRequest, res: Response) => {
           fail(res, 400, 'INSUFFICIENT_POINTS', 'Not enough loyalty points.');
           return;
         }
-        loyaltyDiscount = (loyaltyPts / 100) * 10;
       }
 
-      const total = Math.max(0, subtotal + deliveryFee + serviceFee - discount - loyaltyDiscount);
+      let quote;
+      try {
+        quote = await quoteOrder(client, {
+          restaurantId,
+          items,
+          deliveryAddressId,
+          userId: req.userId,
+          couponCode,
+          loyaltyPointsToRedeem: loyaltyPts,
+          deliveryLatitude,
+          deliveryLongitude,
+          restaurantLatitude,
+          restaurantLongitude,
+        });
+      } catch (quoteErr) {
+        await client.query('ROLLBACK');
+        if (quoteErr instanceof Error && quoteErr.message.includes('not found')) {
+          fail(res, 400, 'VALIDATION_ERROR', quoteErr.message);
+          return;
+        }
+        throw quoteErr;
+      }
+
+      if (couponCode && quote.discount > 0) {
+        await client.query(
+          'UPDATE coupons SET uses_count = uses_count + 1 WHERE code = $1',
+          [(couponCode as string).trim().toUpperCase()],
+        );
+      }
+
+      const {
+        subtotal,
+        deliveryFee,
+        serviceFee,
+        smallOrderFee,
+        discount,
+        loyaltyDiscount,
+        total,
+        distanceKm,
+        estimatedDeliveryMinutes,
+        resolvedItems,
+      } = quote;
 
       const paymentStatus = paymentMethod === 'cash' ? 'pending_cod' : 'pending';
 
       const orderRow = await client.query(`
-        INSERT INTO orders (user_id, restaurant_id, status, subtotal, delivery_fee, service_fee, discount, total,
-          payment_method, payment_status, coupon_code, delivery_address_id, delivery_notes, loyalty_points_redeemed)
-        VALUES ($1,$2,'placed',$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+        INSERT INTO orders (user_id, restaurant_id, status, subtotal, delivery_fee, service_fee, small_order_fee,
+          discount, total, payment_method, payment_status, coupon_code, delivery_address_id, delivery_notes,
+          loyalty_points_redeemed, distance_km, estimated_delivery_minutes)
+        VALUES ($1,$2,'placed',$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
         RETURNING *
-      `, [req.userId, restaurantId, subtotal, deliveryFee, serviceFee, discount, total,
-          paymentMethod, paymentStatus, couponCode ?? null, deliveryAddressId, deliveryNotes ?? null, loyaltyPts]);
+      `, [
+        req.userId, restaurantId, subtotal, deliveryFee, serviceFee, smallOrderFee,
+        discount, total, paymentMethod, paymentStatus,
+        couponCode ?? null, deliveryAddressId, deliveryNotes ?? null, loyaltyPts,
+        distanceKm, estimatedDeliveryMinutes,
+      ]);
 
       const orderId = orderRow.rows[0].id as string;
       for (const item of resolvedItems) {
@@ -139,27 +227,30 @@ router.post('/', requireAuth, async (req: AuthRequest, res: Response) => {
         `, [orderId, item.menuItemId, item.quantity, item.unitPrice, JSON.stringify(item.addonIds), item.instructions ?? null]);
       }
 
-      // Deduct loyalty points inside transaction
       if (loyaltyPts > 0) {
         await client.query(
           `UPDATE users SET loyalty_points_balance = loyalty_points_balance - $1 WHERE id = $2`,
-          [loyaltyPts, req.userId]
+          [loyaltyPts, req.userId],
         );
         await client.query(
           `INSERT INTO loyalty_transactions (user_id, order_id, points, type, description)
            VALUES ($1, $2, $3, 'redeemed', $4)`,
-          [req.userId, orderId, -loyaltyPts, `Redeemed on order #${orderId.slice(-6).toUpperCase()}`]
+          [req.userId, orderId, -loyaltyPts, `Redeemed on order #${orderId.slice(-6).toUpperCase()}`],
         );
       }
+
+      await client.query('COMMIT');
 
       const order = await fetchOrderDetail(client, orderId);
       ok(res, order, undefined, 201);
 
-      // Push notification (fire-and-forget after response)
       const title = 'Order Placed!';
       const body = `Your order from ${restaurantName} has been placed and is awaiting confirmation.`;
       void sendPushToUser(req.userId!, title, body, { type: 'order_update', orderId });
       void insertNotification(req.userId!, 'order_placed', title, body, { orderId });
+    } catch (innerErr) {
+      await client.query('ROLLBACK');
+      throw innerErr;
     } finally {
       client.release();
     }
@@ -190,6 +281,30 @@ router.get('/', requireAuth, async (req: AuthRequest, res: Response) => {
     ok(res, result.rows.map(mapOrderRow));
   } catch (err) {
     logger.error({ err }, 'list orders');
+    fail(res, 500, 'SERVER_ERROR', 'Something went wrong.');
+  }
+});
+
+// GET /orders/:id/payment-status
+router.get('/:id/payment-status', requireAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const result = await pool.query(
+      'SELECT id, payment_status, status, payment_method FROM orders WHERE id=$1 AND user_id=$2',
+      [req.params.id, req.userId]
+    );
+    if (!result.rows.length) {
+      fail(res, 404, 'NOT_FOUND', 'Order not found.');
+      return;
+    }
+    const row = result.rows[0];
+    ok(res, {
+      orderId: row.id,
+      paymentStatus: row.payment_status,
+      status: row.status,
+      paymentMethod: row.payment_method,
+    });
+  } catch (err) {
+    logger.error({ err }, 'order payment-status');
     fail(res, 500, 'SERVER_ERROR', 'Something went wrong.');
   }
 });

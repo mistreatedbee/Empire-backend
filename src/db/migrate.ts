@@ -159,6 +159,112 @@ CREATE INDEX IF NOT EXISTS idx_restaurants_featured ON restaurants(is_featured);
 CREATE INDEX IF NOT EXISTS idx_menu_items_restaurant ON menu_items(restaurant_id);
 CREATE INDEX IF NOT EXISTS idx_orders_user ON orders(user_id);
 CREATE INDEX IF NOT EXISTS idx_user_addresses_user ON user_addresses(user_id);
+
+CREATE TABLE IF NOT EXISTS driver_applications (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  id_number VARCHAR(20),
+  date_of_birth DATE,
+  vehicle_type VARCHAR(50),
+  vehicle_make VARCHAR(100),
+  vehicle_model VARCHAR(100),
+  vehicle_year INT,
+  vehicle_reg VARCHAR(50),
+  bank_name VARCHAR(100),
+  bank_account_no VARCHAR(50),
+  bank_holder VARCHAR(200),
+  bank_branch VARCHAR(20),
+  id_document_url VARCHAR(500),
+  drivers_license_url VARCHAR(500),
+  vehicle_registration_url VARCHAR(500),
+  status VARCHAR(20) NOT NULL DEFAULT 'pending',
+  rejection_reason TEXT,
+  submitted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  reviewed_at TIMESTAMPTZ,
+  reviewed_by UUID REFERENCES users(id),
+  UNIQUE(user_id)
+);
+
+CREATE TABLE IF NOT EXISTS restaurant_applications (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  trading_name VARCHAR(200) NOT NULL,
+  business_reg_no VARCHAR(100),
+  cuisine_type VARCHAR(100),
+  address VARCHAR(500),
+  city VARCHAR(200),
+  description TEXT,
+  min_order NUMERIC(10,2),
+  delivery_fee NUMERIC(10,2),
+  delivery_radius NUMERIC(10,2),
+  business_doc_url VARCHAR(500),
+  bank_name VARCHAR(100),
+  bank_account_no VARCHAR(50),
+  bank_holder VARCHAR(200),
+  status VARCHAR(20) NOT NULL DEFAULT 'pending',
+  rejection_reason TEXT,
+  submitted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  reviewed_at TIMESTAMPTZ,
+  reviewed_by UUID REFERENCES users(id),
+  UNIQUE(user_id)
+);
+
+CREATE TABLE IF NOT EXISTS admin_audit_log (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  admin_id UUID REFERENCES users(id),
+  action VARCHAR(100) NOT NULL,
+  target_type VARCHAR(50),
+  target_id UUID,
+  notes TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS payment_transactions (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  order_id UUID REFERENCES orders(id) ON DELETE SET NULL,
+  provider VARCHAR(50) NOT NULL,
+  external_id VARCHAR(200) NOT NULL,
+  amount NUMERIC(10,2),
+  status VARCHAR(50) NOT NULL,
+  raw_payload JSONB,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE(provider, external_id)
+);
+
+ALTER TABLE users ADD COLUMN IF NOT EXISTS approval_status VARCHAR(20) NOT NULL DEFAULT 'approved';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS approved_at TIMESTAMPTZ;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS approved_by UUID REFERENCES users(id);
+ALTER TABLE users ADD COLUMN IF NOT EXISTS suspension_reason TEXT;
+
+CREATE INDEX IF NOT EXISTS idx_driver_apps_status ON driver_applications(status);
+CREATE INDEX IF NOT EXISTS idx_restaurant_apps_status ON restaurant_applications(status);
+CREATE INDEX IF NOT EXISTS idx_orders_payment_status ON orders(payment_status);
+CREATE INDEX IF NOT EXISTS idx_payment_tx_order ON payment_transactions(order_id);
+
+CREATE TABLE IF NOT EXISTS pricing_rules (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name VARCHAR(100) NOT NULL DEFAULT 'default',
+  is_active BOOLEAN NOT NULL DEFAULT true,
+  base_fee NUMERIC(10,2) NOT NULL DEFAULT 20,
+  included_km NUMERIC(5,2) NOT NULL DEFAULT 3,
+  mid_km_rate NUMERIC(10,2) NOT NULL DEFAULT 5,
+  mid_km_until NUMERIC(5,2) NOT NULL DEFAULT 7,
+  long_km_rate NUMERIC(10,2) NOT NULL DEFAULT 7,
+  service_fee_pct NUMERIC(6,4) NOT NULL DEFAULT 0.05,
+  small_order_threshold NUMERIC(10,2) NOT NULL DEFAULT 100,
+  small_order_fee NUMERIC(10,2) NOT NULL DEFAULT 10,
+  peak_multiplier NUMERIC(4,2) NOT NULL DEFAULT 1.0,
+  driver_share_pct NUMERIC(6,4) NOT NULL DEFAULT 0.75,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+INSERT INTO pricing_rules (name, is_active)
+SELECT 'default', true
+WHERE NOT EXISTS (SELECT 1 FROM pricing_rules WHERE name = 'default');
+
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS small_order_fee NUMERIC(10,2) NOT NULL DEFAULT 0;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS distance_km NUMERIC(8,2);
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS estimated_delivery_minutes INTEGER;
 `;
 
 async function migrate() {

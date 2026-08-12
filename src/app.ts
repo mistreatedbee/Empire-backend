@@ -43,6 +43,8 @@ app.use(cors({
 
 // 10mb to accommodate base64 proof-of-delivery photos sent by drivers
 app.use(express.json({ limit: '10mb' }));
+// PayFast ITN webhooks send application/x-www-form-urlencoded
+app.use(express.urlencoded({ extended: false }));
 
 // ── Logging ───────────────────────────────────────────────────────────────────
 app.use(pinoHttp({ logger }));

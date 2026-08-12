@@ -3,7 +3,9 @@ import { Router, Response } from 'express';
 import { pool } from '../db';
 import { requireAdmin, AuthRequest } from '../middleware/auth';
 import { ok, fail } from '../utils/response';
-import { sendPushToUser } from '../utils/push';
+import { notify } from '../utils/notify';
+import { sendTransactionalEmail } from '../utils/email';
+import { mapApplicationRow } from '../utils/serializers';
 
 const router = Router();
 
@@ -57,13 +59,14 @@ router.get('/stats', async (_req: AuthRequest, res: Response) => {
 
 // ─── Applications ─────────────────────────────────────────────────────────────
 
-// GET /admin/applications?type=driver|restaurant&status=pending|approved|rejected
+// GET /admin/applications?type=driver|restaurant|all&status=pending|approved|rejected
 router.get('/applications', async (req: AuthRequest, res: Response) => {
   try {
     const type = (req.query.type as string) || 'all';
     const status = (req.query.status as string) || 'pending';
 
-    const results: unknown[] = [];
+    const results: Record<string, unknown>[] = [];
+    const seenUserIds = new Set<string>();
 
     if (type === 'driver' || type === 'all') {
       const q = await pool.query(
@@ -74,7 +77,10 @@ router.get('/applications', async (req: AuthRequest, res: Response) => {
          ORDER BY da.submitted_at DESC`,
         [status]
       );
-      q.rows.forEach((r) => results.push({ ...r, applicationType: 'driver' }));
+      q.rows.forEach((r) => {
+        seenUserIds.add(r.user_id as string);
+        results.push(mapApplicationRow({ ...r, applicationType: 'driver' }));
+      });
     }
 
     if (type === 'restaurant' || type === 'all') {
@@ -86,10 +92,48 @@ router.get('/applications', async (req: AuthRequest, res: Response) => {
          ORDER BY ra.submitted_at DESC`,
         [status]
       );
-      q.rows.forEach((r) => results.push({ ...r, applicationType: 'restaurant' }));
+      q.rows.forEach((r) => {
+        seenUserIds.add(r.user_id as string);
+        results.push(mapApplicationRow({ ...r, applicationType: 'restaurant' }));
+      });
     }
 
-    results.sort((a: any, b: any) => new Date(b.submitted_at).getTime() - new Date(a.submitted_at).getTime());
+    // Pending users who registered but never submitted step 4
+    if (status === 'pending') {
+      const roleFilter =
+        type === 'driver' ? "role = 'driver'" :
+        type === 'restaurant' ? "role = 'restaurant'" :
+        "role IN ('driver', 'restaurant')";
+
+      const orphans = await pool.query(
+        `SELECT u.id AS user_id, u.first_name, u.last_name, u.email, u.phone, u.role, u.approval_status
+         FROM users u
+         WHERE u.approval_status = 'pending' AND ${roleFilter}
+         ORDER BY u.created_at DESC`
+      );
+
+      for (const u of orphans.rows) {
+        if (seenUserIds.has(u.user_id as string)) continue;
+        results.push(mapApplicationRow({
+          id: u.user_id,
+          user_id: u.user_id,
+          first_name: u.first_name,
+          last_name: u.last_name,
+          email: u.email,
+          phone: u.phone,
+          status: 'pending',
+          submitted_at: null,
+          applicationType: u.role as 'driver' | 'restaurant',
+          incompleteSignup: true,
+        }));
+      }
+    }
+
+    results.sort((a, b) => {
+      const aTime = a.submittedAt ? new Date(a.submittedAt as string).getTime() : 0;
+      const bTime = b.submittedAt ? new Date(b.submittedAt as string).getTime() : 0;
+      return bTime - aTime;
+    });
 
     ok(res, results);
   } catch (err) {
@@ -130,7 +174,7 @@ router.get('/applications/:id', async (req: AuthRequest, res: Response) => {
       fail(res, 404, 'NOT_FOUND', 'Application not found.');
       return;
     }
-    ok(res, row);
+    ok(res, mapApplicationRow(row));
   } catch (err) {
     logger.error({ err }, 'GET /admin/applications/:id');
     fail(res, 500, 'SERVER_ERROR', 'Something went wrong.');
@@ -185,7 +229,17 @@ router.put('/applications/:id/approve', async (req: AuthRequest, res: Response) 
         );
 
         await client.query('COMMIT');
-        void sendPushToUser(user_id as string, 'Application Approved! 🎉', 'Congratulations! Your driver application has been approved. You can now log in to start delivering.', { type: 'approval' });
+        const applicantEmail = await pool.query('SELECT email, first_name FROM users WHERE id=$1', [user_id]);
+        const email = applicantEmail.rows[0]?.email as string | undefined;
+        const name = applicantEmail.rows[0]?.first_name as string | undefined;
+        void notify(user_id as string, 'approval', 'Application Approved! 🎉', 'Congratulations! Your driver application has been approved. You can now log in to start delivering.', { type: 'approval' });
+        if (email) {
+          void sendTransactionalEmail(
+            email,
+            'Your Empire Deliveries driver application was approved',
+            `Hi ${name ?? 'there'},\n\nYour driver application has been approved. Open the Empire Deliveries app to start delivering.`,
+          );
+        }
 
       } else {
         const appRes = await client.query(
@@ -223,7 +277,17 @@ router.put('/applications/:id/approve', async (req: AuthRequest, res: Response) 
         );
 
         await client.query('COMMIT');
-        void sendPushToUser(user_id as string, 'Application Approved! 🎉', 'Your restaurant has been approved. You can now log in to manage your restaurant on Empire Deliveries.', { type: 'approval' });
+        const applicantEmail = await pool.query('SELECT email, first_name FROM users WHERE id=$1', [user_id]);
+        const email = applicantEmail.rows[0]?.email as string | undefined;
+        const name = applicantEmail.rows[0]?.first_name as string | undefined;
+        void notify(user_id as string, 'approval', 'Application Approved! 🎉', 'Your restaurant has been approved. You can now log in to manage your restaurant on Empire Deliveries.', { type: 'approval' });
+        if (email) {
+          void sendTransactionalEmail(
+            email,
+            'Your Empire Deliveries restaurant application was approved',
+            `Hi ${name ?? 'there'},\n\nYour restaurant application has been approved. Open the Empire Deliveries app to manage your restaurant.`,
+          );
+        }
       }
 
       ok(res, { approved: true });
@@ -260,6 +324,10 @@ router.put('/applications/:id/reject', async (req: AuthRequest, res: Response) =
       return;
     }
     const userId = appRes.rows[0].user_id as string;
+    const userRow = await pool.query('SELECT email, first_name FROM users WHERE id=$1', [userId]);
+    const email = userRow.rows[0]?.email as string | undefined;
+    const name = userRow.rows[0]?.first_name as string | undefined;
+    const rejectionMsg = `Your ${type} application was not approved. ${reason ? 'Reason: ' + reason : 'Please contact support for more information.'}`;
 
     await pool.query(
       `UPDATE users SET approval_status='rejected' WHERE id=$1`,
@@ -270,7 +338,14 @@ router.put('/applications/:id/reject', async (req: AuthRequest, res: Response) =
       [req.userId, `reject_${type}`, table, id, reason ?? '']
     );
 
-    void sendPushToUser(userId, 'Application Update', `Your ${type} application was not approved. ${reason ? 'Reason: ' + reason : 'Please contact support for more information.'}`, { type: 'rejection' });
+    void notify(userId, 'rejection', 'Application Update', rejectionMsg, { type: 'rejection' });
+    if (email) {
+      void sendTransactionalEmail(
+        email,
+        'Update on your Empire Deliveries application',
+        `Hi ${name ?? 'there'},\n\n${rejectionMsg}`,
+      );
+    }
 
     ok(res, { rejected: true });
   } catch (err) {

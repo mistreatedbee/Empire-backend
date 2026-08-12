@@ -61,7 +61,7 @@ router.put('/me', requireRestaurant, async (req: AuthRequest, res: Response) => 
       fail(res, 404, 'NOT_FOUND', 'No restaurant linked to this account.');
       return;
     }
-    const { name, address, deliveryFee, minOrder, description, isOpen, deliveryTimeMin, deliveryTimeMax } = req.body as {
+    const { name, address, deliveryFee, minOrder, description, isOpen, deliveryTimeMin, deliveryTimeMax, logo, coverImage } = req.body as {
       name?: string;
       address?: string;
       deliveryFee?: number;
@@ -70,6 +70,8 @@ router.put('/me', requireRestaurant, async (req: AuthRequest, res: Response) => 
       isOpen?: boolean;
       deliveryTimeMin?: number;
       deliveryTimeMax?: number;
+      logo?: string;
+      coverImage?: string;
     };
     if (name !== undefined && !name.trim()) {
       fail(res, 400, 'VALIDATION_ERROR', 'name cannot be empty.');
@@ -98,14 +100,16 @@ router.put('/me', requireRestaurant, async (req: AuthRequest, res: Response) => 
              delivery_fee=COALESCE($3, delivery_fee), min_order=COALESCE($4, min_order),
              description=COALESCE($5, description), is_open=COALESCE($6, is_open),
              delivery_time_min=COALESCE($7, delivery_time_min), delivery_time_max=COALESCE($8, delivery_time_max),
+             logo=COALESCE($9, logo), cover_image=COALESCE($10, cover_image),
              updated_at=NOW()
-       WHERE id=$9
-       RETURNING id, name, address, delivery_fee, min_order, description, is_open, delivery_time_min, delivery_time_max`,
+       WHERE id=$11
+       RETURNING id, name, address, delivery_fee, min_order, description, is_open, delivery_time_min, delivery_time_max, logo, cover_image`,
       [
         name?.trim() ?? null, address?.trim() ?? null,
         deliveryFee !== undefined ? Number(deliveryFee) : null, minOrder !== undefined ? Number(minOrder) : null,
         description !== undefined ? description.trim() : null, isOpen !== undefined ? isOpen : null,
         deliveryTimeMin !== undefined ? Number(deliveryTimeMin) : null, deliveryTimeMax !== undefined ? Number(deliveryTimeMax) : null,
+        logo ?? null, coverImage ?? null,
         restaurantId,
       ]
     );
@@ -120,6 +124,8 @@ router.put('/me', requireRestaurant, async (req: AuthRequest, res: Response) => 
       isOpen: r.is_open,
       deliveryTimeMin: r.delivery_time_min,
       deliveryTimeMax: r.delivery_time_max,
+      logo: r.logo,
+      coverImage: r.cover_image,
     });
   } catch (err) {
     logger.error({ err }, 'PUT /restaurant/me');

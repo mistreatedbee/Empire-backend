@@ -1,6 +1,12 @@
 import { logger } from '../utils/logger';
 import { Router, Response } from 'express';
 import { pool } from '../db';
+import { loadPricingRules } from '../utils/pricing';
+
+async function driverPayoutForFee(deliveryFee: number): Promise<number> {
+  const rules = await loadPricingRules(pool);
+  return Math.round(parseFloat(String(deliveryFee)) * rules.driverSharePct * 100) / 100;
+}
 import { requireDriver, AuthRequest } from '../middleware/auth';
 import { ok, fail } from '../utils/response';
 import { sendPushToUser } from '../utils/push';
@@ -200,7 +206,7 @@ router.get('/deliveries/available', requireDriver, async (req: AuthRequest, res:
       return;
     }
     const row = result.rows[0];
-    const payout = Math.round(parseFloat(String(row.delivery_fee)) * 0.80 * 100) / 100;
+    const payout = await driverPayoutForFee(parseFloat(String(row.delivery_fee)));
     const addrParts = [row.customer_street, row.customer_suburb, row.customer_city].filter(Boolean);
     ok(res, {
       orderId: row.id,
@@ -293,7 +299,7 @@ router.post('/deliveries/:id/accept', requireDriver, async (req: AuthRequest, re
         return;
       }
 
-      const payout = Math.round(parseFloat(String(orderRes.rows[0].delivery_fee)) * 0.80 * 100) / 100;
+      const payout = await driverPayoutForFee(parseFloat(String(orderRes.rows[0].delivery_fee)));
 
       await client.query(
         `UPDATE orders SET driver_id=$1, status='confirmed' WHERE id=$2`,
