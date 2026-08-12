@@ -446,7 +446,7 @@ router.get('/:id/tracking/stream', requireAuth, (req: AuthRequest, res: Response
   const send = async () => {
     try {
       const data = await getTrackingData(req.params.id, req.userId!);
-      if (data) res.write(`data: ${JSON.stringify(data)}\n\n`);
+      if (data) res.write(`data: ${JSON.stringify(data)}\r\n\r\n`);
     } catch { /* skip on transient errors */ }
   };
 
