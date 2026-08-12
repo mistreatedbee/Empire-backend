@@ -4,10 +4,13 @@ import { pool } from '../db';
 import { requireAuth, AuthRequest } from '../middleware/auth';
 import { ok, fail } from '../utils/response';
 import {
-  buildPayFastCheckoutQuery,
-  buildPayFastCheckoutSignature,
   buildPayFastItnSignature,
 } from '../utils/payfast';
+import {
+  buildPayfastCheckoutPage,
+  createPayfastCheckoutToken,
+  parsePayfastCheckoutToken,
+} from '../utils/payfastCheckout';
 
 const router = Router();
 
@@ -17,7 +20,16 @@ const PAYFAST_URL = SANDBOX
   : 'https://www.payfast.co.za/eng/process';
 const MERCHANT_ID = process.env.PAYFAST_MERCHANT_ID ?? '10000100';
 const MERCHANT_KEY = process.env.PAYFAST_MERCHANT_KEY ?? '46f0cd694581a';
-const PASSPHRASE = process.env.PAYFAST_PASSPHRASE?.trim() ?? (SANDBOX ? 'jt7NOE43FZPn' : '');
+
+function resolvePayfastPassphrase(): string {
+  const fromEnv = process.env.PAYFAST_PASSPHRASE?.trim();
+  if (fromEnv) return fromEnv;
+  // Sandbox test merchant always uses this passphrase unless overridden above.
+  if (SANDBOX) return 'jt7NOE43FZPn';
+  return '';
+}
+
+const PASSPHRASE = resolvePayfastPassphrase();
 const BACKEND_URL = (process.env.BACKEND_URL ?? 'https://empire-backend-8066.onrender.com').replace(/\/$/, '');
 const APP_SCHEME = process.env.APP_SCHEME ?? 'empire';
 const PAYFAST_RETURN_URL = `${BACKEND_URL}/payments/payfast/return`;
@@ -52,6 +64,19 @@ router.get('/payfast/cancel', (_req: Request, res: Response) => {
   res
     .type('html')
     .send(payfastRedirectPage(`${APP_SCHEME}://payment/cancelled`, 'Payment cancelled. Returning to the app…'));
+});
+
+// Serves an auto-submit POST form to PayFast (avoids GET query-string signature issues).
+router.get('/payfast/checkout/:token', (req: Request, res: Response) => {
+  const session = parsePayfastCheckoutToken(String(req.params.token ?? ''));
+  if (!session) {
+    res.status(400).type('html').send('<p>This payment link has expired. Return to the app and try again.</p>');
+    return;
+  }
+
+  res
+    .type('html')
+    .send(buildPayfastCheckoutPage(session.params, session.actionUrl, PASSPHRASE || undefined));
 });
 
 // ─── PayFast ──────────────────────────────────────────────────────────────────
@@ -93,13 +118,16 @@ router.post('/payfast/initiate', requireAuth, async (req: AuthRequest, res: Resp
       email_address: String(order.email ?? '').trim(),
       m_payment_id: String(orderId),
       amount: parseFloat(String(order.total)).toFixed(2),
-      item_name: `Empire Deliveries Order ${String(orderId).slice(0, 8)}`,
+      item_name: `Empire Order ${String(orderId).slice(0, 8)}`,
     };
 
-    const signature = buildPayFastCheckoutSignature(params, PASSPHRASE);
-    const queryString = buildPayFastCheckoutQuery(params, signature);
+    const token = createPayfastCheckoutToken({ params, actionUrl: PAYFAST_URL });
+    logger.info(
+      { sandbox: SANDBOX, merchantId: MERCHANT_ID, hasPassphrase: Boolean(PASSPHRASE) },
+      'payfast initiate',
+    );
 
-    ok(res, { redirectUrl: `${PAYFAST_URL}?${queryString}` });
+    ok(res, { redirectUrl: `${BACKEND_URL}/payments/payfast/checkout/${token}` });
   } catch (err) {
     logger.error({ err }, 'payfast initiate');
     fail(res, 500, 'SERVER_ERROR', 'Something went wrong.');
@@ -246,12 +274,11 @@ router.post('/wallet/topup', requireAuth, async (req: AuthRequest, res: Response
       email_address: String(u.email ?? '').trim(),
       m_payment_id: reference,
       amount: amount.toFixed(2),
-      item_name: 'Empire Deliveries Wallet Top-up',
+      item_name: 'Empire Wallet Top-up',
     };
-    const signature = buildPayFastCheckoutSignature(params, PASSPHRASE);
-    const queryString = buildPayFastCheckoutQuery(params, signature);
+    const token = createPayfastCheckoutToken({ params, actionUrl: PAYFAST_URL });
 
-    ok(res, { redirectUrl: `${PAYFAST_URL}?${queryString}` });
+    ok(res, { redirectUrl: `${BACKEND_URL}/payments/payfast/checkout/${token}` });
   } catch (err) {
     logger.error({ err }, 'wallet topup');
     fail(res, 500, 'SERVER_ERROR', 'Something went wrong.');
