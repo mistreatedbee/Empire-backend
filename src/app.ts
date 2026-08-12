@@ -23,7 +23,10 @@ import uploadsRouter from './routes/uploads';
 const app = express();
 
 // ── Security ──────────────────────────────────────────────────────────────────
-app.use(helmet());
+// CSP disabled: PayFast checkout serves an auto-submit HTML form that POSTs to
+// payfast.co.za. Helmet's default form-action 'self' blocks that and leaves users
+// stuck on the Render checkout URL.
+app.use(helmet({ contentSecurityPolicy: false }));
 
 // Falls back to the known production web origins (landing site + its web admin
 // panel) rather than '*' when ALLOWED_ORIGINS isn't set on the host, so the

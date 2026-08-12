@@ -82,17 +82,27 @@ export function buildPayFastCheckoutFormHtml(
   <title>Redirecting to PayFast…</title>
   <style>
     body { font-family: system-ui, sans-serif; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; background: #fafafa; color: #333; }
-    .box { text-align: center; padding: 24px; }
+    .box { text-align: center; padding: 24px; max-width: 320px; }
+    button { font: inherit; padding: 12px 20px; cursor: pointer; }
   </style>
 </head>
-<body onload="document.getElementById('payfast-form').submit()">
+<body>
   <div class="box">
     <p>Redirecting to PayFast…</p>
-    <p><button type="submit" form="payfast-form">Continue to payment</button></p>
+    <noscript>
+      <p>JavaScript is required for automatic redirect.</p>
+    </noscript>
+    <p><button type="submit" form="payfast-form">Continue to PayFast</button></p>
   </div>
   <form id="payfast-form" action="${escapeHtml(actionUrl)}" method="post">
     ${fields.join('\n    ')}
   </form>
+  <script>
+    (function () {
+      var form = document.getElementById('payfast-form');
+      if (form) form.submit();
+    })();
+  </script>
 </body>
 </html>`;
 }
