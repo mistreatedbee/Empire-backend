@@ -1,9 +1,13 @@
 import { logger } from '../utils/logger';
 import { Router, Request, Response } from 'express';
-import crypto from 'crypto';
 import { pool } from '../db';
 import { requireAuth, AuthRequest } from '../middleware/auth';
 import { ok, fail } from '../utils/response';
+import {
+  buildPayFastCheckoutQuery,
+  buildPayFastCheckoutSignature,
+  buildPayFastItnSignature,
+} from '../utils/payfast';
 
 const router = Router();
 
@@ -13,7 +17,7 @@ const PAYFAST_URL = SANDBOX
   : 'https://www.payfast.co.za/eng/process';
 const MERCHANT_ID = process.env.PAYFAST_MERCHANT_ID ?? '10000100';
 const MERCHANT_KEY = process.env.PAYFAST_MERCHANT_KEY ?? '46f0cd694581a';
-const PASSPHRASE = process.env.PAYFAST_PASSPHRASE ?? 'jt7NOE43FZPn';
+const PASSPHRASE = process.env.PAYFAST_PASSPHRASE?.trim() ?? (SANDBOX ? 'jt7NOE43FZPn' : '');
 const BACKEND_URL = (process.env.BACKEND_URL ?? 'https://empire-backend-8066.onrender.com').replace(/\/$/, '');
 const APP_SCHEME = process.env.APP_SCHEME ?? 'empire';
 const PAYFAST_RETURN_URL = `${BACKEND_URL}/payments/payfast/return`;
@@ -84,16 +88,16 @@ router.post('/payfast/initiate', requireAuth, async (req: AuthRequest, res: Resp
       return_url: PAYFAST_RETURN_URL,
       cancel_url: PAYFAST_CANCEL_URL,
       notify_url: `${BACKEND_URL}/payments/payfast/notify`,
-      name_first: order.first_name as string,
-      name_last: order.last_name as string,
-      email_address: order.email as string,
-      m_payment_id: orderId as string,
-      amount: parseFloat(order.total as string).toFixed(2),
-      item_name: `Empire Deliveries Order #${(orderId as string).slice(0, 8)}`,
+      name_first: String(order.first_name ?? '').trim(),
+      name_last: String(order.last_name ?? '').trim(),
+      email_address: String(order.email ?? '').trim(),
+      m_payment_id: String(orderId),
+      amount: parseFloat(String(order.total)).toFixed(2),
+      item_name: `Empire Deliveries Order ${String(orderId).slice(0, 8)}`,
     };
 
-    const signature = buildPayFastSignature(params, PASSPHRASE);
-    const queryString = new URLSearchParams({ ...params, signature }).toString();
+    const signature = buildPayFastCheckoutSignature(params, PASSPHRASE);
+    const queryString = buildPayFastCheckoutQuery(params, signature);
 
     ok(res, { redirectUrl: `${PAYFAST_URL}?${queryString}` });
   } catch (err) {
@@ -109,7 +113,7 @@ router.post('/payfast/notify', async (req: Request, res: Response) => {
     const receivedSignature = data.signature;
     delete data.signature;
 
-    const expectedSignature = buildPayFastSignature(data, PASSPHRASE);
+    const expectedSignature = buildPayFastItnSignature(data, PASSPHRASE);
     if (receivedSignature !== expectedSignature) {
       res.status(400).send('Invalid signature');
       return;
@@ -237,15 +241,15 @@ router.post('/wallet/topup', requireAuth, async (req: AuthRequest, res: Response
       return_url: PAYFAST_RETURN_URL,
       cancel_url: PAYFAST_CANCEL_URL,
       notify_url: `${BACKEND_URL}/payments/payfast/notify`,
-      name_first: u.first_name as string,
-      name_last: u.last_name as string,
-      email_address: u.email as string,
+      name_first: String(u.first_name ?? '').trim(),
+      name_last: String(u.last_name ?? '').trim(),
+      email_address: String(u.email ?? '').trim(),
       m_payment_id: reference,
       amount: amount.toFixed(2),
       item_name: 'Empire Deliveries Wallet Top-up',
     };
-    const signature = buildPayFastSignature(params, PASSPHRASE);
-    const queryString = new URLSearchParams({ ...params, signature }).toString();
+    const signature = buildPayFastCheckoutSignature(params, PASSPHRASE);
+    const queryString = buildPayFastCheckoutQuery(params, signature);
 
     ok(res, { redirectUrl: `${PAYFAST_URL}?${queryString}` });
   } catch (err) {
@@ -327,17 +331,5 @@ router.post('/wallet/pay', requireAuth, async (req: AuthRequest, res: Response) 
     fail(res, 500, 'SERVER_ERROR', 'Something went wrong.');
   }
 });
-
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
-function buildPayFastSignature(params: Record<string, string>, passphrase: string): string {
-  const sorted = Object.keys(params)
-    .sort()
-    .filter((k) => params[k] !== '' && params[k] !== undefined)
-    .map((k) => `${k}=${encodeURIComponent(params[k]).replace(/%20/g, '+')}`)
-    .join('&');
-  const withPass = passphrase ? `${sorted}&passphrase=${encodeURIComponent(passphrase).replace(/%20/g, '+')}` : sorted;
-  return crypto.createHash('md5').update(withPass).digest('hex');
-}
 
 export default router;
