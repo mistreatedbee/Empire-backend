@@ -1,3 +1,4 @@
+import { distanceKmBetween, isValidCoord, parseCoord } from '../utils/distance';
 import { logger } from '../utils/logger';
 import { Router, Response } from 'express';
 import { pool } from '../db';
@@ -335,34 +336,78 @@ router.get('/:id', requireAuth, async (req: AuthRequest, res: Response) => {
 
 async function getTrackingData(orderId: string, userId: string) {
   const result = await pool.query(
-    `SELECT o.id, o.status, o.placed_at,
+    `SELECT o.id, o.status, o.placed_at, o.estimated_delivery_minutes, o.driver_id,
+            da.accepted_at, da.picked_up_at, da.created_at AS assignment_created_at,
+            ua.latitude AS dest_lat, ua.longitude AS dest_lng,
+            r.latitude AS restaurant_lat, r.longitude AS restaurant_lng,
             d.location_lat, d.location_lng, d.rating AS driver_rating, d.vehicle_type,
-            u.first_name || ' ' || u.last_name AS driver_name, u.phone AS driver_phone,
-            da.accepted_at, da.picked_up_at
+            u.first_name AS driver_first_name, u.last_name AS driver_last_name,
+            u.phone AS driver_phone, u.avatar_url AS driver_avatar
      FROM orders o
-     LEFT JOIN driver_assignments da ON da.order_id = o.id
-     LEFT JOIN drivers d ON d.id = da.driver_id
-     LEFT JOIN users u ON u.id = da.driver_id
+     LEFT JOIN user_addresses ua ON ua.id = o.delivery_address_id
+     LEFT JOIN restaurants r ON r.id = o.restaurant_id
+     LEFT JOIN drivers d ON d.id = o.driver_id
+     LEFT JOIN users u ON u.id = o.driver_id
+     LEFT JOIN driver_assignments da ON da.order_id = o.id AND da.driver_id = o.driver_id
      WHERE o.id = $1 AND o.user_id = $2`,
     [orderId, userId]
   );
   if (!result.rows.length) return null;
   const row = result.rows[0];
-  const etaMinutes = computeEta(
+  const computedEta = computeEta(
     row.status as string,
     row.accepted_at as Date | null,
-    row.picked_up_at as Date | null
+    row.picked_up_at as Date | null,
   );
+  const storedEta = row.estimated_delivery_minutes != null
+    ? parseInt(String(row.estimated_delivery_minutes), 10)
+    : null;
+  const etaMinutes = storedEta && storedEta > 0 ? storedEta : computedEta;
+
+  const destLat = parseCoord(row.dest_lat);
+  const destLng = parseCoord(row.dest_lng);
+  const driverLat = parseCoord(row.location_lat);
+  const driverLng = parseCoord(row.location_lng);
+  const restaurantLat = parseCoord(row.restaurant_lat);
+  const restaurantLng = parseCoord(row.restaurant_lng);
+
+  const driverAccepted = Boolean(row.driver_id);
+  const driverAcceptedAt = row.accepted_at ?? row.assignment_created_at ?? null;
+  const driverDistanceKm = driverAccepted
+    ? distanceKmBetween(driverLat, driverLng, destLat, destLng)
+    : null;
+  const restaurantDistanceKm = distanceKmBetween(restaurantLat, restaurantLng, destLat, destLng);
+
   return {
+    orderId: row.id,
     status: row.status,
+    eta: etaMinutes,
     etaMinutes,
-    driver: row.driver_name ? {
-      name: row.driver_name,
+    estimatedDeliveryMinutes: etaMinutes,
+    updatedAt: new Date().toISOString(),
+    driverAccepted,
+    driverAcceptedAt,
+    driverDistanceKm,
+    restaurantDistanceKm,
+    customerLocation: isValidCoord(destLat, destLng)
+      ? { latitude: destLat, longitude: destLng }
+      : null,
+    restaurantLocation: isValidCoord(restaurantLat, restaurantLng)
+      ? { latitude: restaurantLat, longitude: restaurantLng }
+      : null,
+    driver: row.driver_id ? {
+      id: row.driver_id,
+      firstName: row.driver_first_name,
+      lastName: row.driver_last_name,
+      name: `${row.driver_first_name ?? ''} ${row.driver_last_name ?? ''}`.trim(),
       phone: row.driver_phone,
+      avatar: row.driver_avatar,
       rating: parseFloat(String(row.driver_rating ?? '0')),
       vehicleType: row.vehicle_type,
-      lat: row.location_lat ? parseFloat(String(row.location_lat)) : null,
-      lng: row.location_lng ? parseFloat(String(row.location_lng)) : null,
+      latitude: driverLat,
+      longitude: driverLng,
+      lat: driverLat,
+      lng: driverLng,
     } : null,
   };
 }
@@ -413,12 +458,45 @@ function computeEta(status: string, acceptedAt: Date | null, pickedUpAt: Date | 
   return 40;
 }
 
+// PATCH /orders/:id/notes — update delivery instructions before pickup
+router.patch('/:id/notes', requireAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const { deliveryNotes } = req.body as { deliveryNotes?: string };
+    if (typeof deliveryNotes !== 'string') {
+      fail(res, 400, 'VALIDATION_ERROR', 'deliveryNotes is required.');
+      return;
+    }
+    const trimmed = deliveryNotes.trim();
+    if (trimmed.length > 500) {
+      fail(res, 400, 'VALIDATION_ERROR', 'Delivery instructions must be 500 characters or less.');
+      return;
+    }
+
+    const result = await pool.query(
+      `UPDATE orders SET delivery_notes=$1
+       WHERE id=$2 AND user_id=$3
+       AND status IN ('placed','confirmed','preparing')
+       RETURNING *`,
+      [trimmed || null, req.params.id, req.userId],
+    );
+    if (!result.rows.length) {
+      fail(res, 400, 'CANNOT_UPDATE', 'Delivery instructions can no longer be changed for this order.');
+      return;
+    }
+    ok(res, mapOrderRow(result.rows[0]));
+  } catch (err) {
+    logger.error({ err }, 'update order notes');
+    fail(res, 500, 'SERVER_ERROR', 'Something went wrong.');
+  }
+});
+
 // POST /orders/:id/cancel
 router.post('/:id/cancel', requireAuth, async (req: AuthRequest, res: Response) => {
   try {
     const result = await pool.query(
-      `UPDATE orders SET status='cancelled' WHERE id=$1 AND user_id=$2
-       AND status IN ('placed','confirmed') RETURNING *`,
+      `UPDATE orders SET status='cancelled', cancelled_at=NOW()
+       WHERE id=$1 AND user_id=$2
+       AND status IN ('pending_payment','placed','confirmed','preparing') RETURNING *`,
       [req.params.id, req.userId]
     );
     if (!result.rows.length) {
@@ -487,7 +565,9 @@ async function fetchOrderDetail(client: import('pg').PoolClient, orderId: string
     client.query(`
       SELECT o.*, r.name AS restaurant_name, r.logo AS restaurant_logo, r.cover_image AS restaurant_cover,
              ua.label AS addr_label, ua.street AS addr_street, ua.suburb AS addr_suburb,
-             ua.city AS addr_city, ua.province AS addr_province
+             ua.city AS addr_city, ua.province AS addr_province,
+             ua.latitude AS addr_latitude, ua.longitude AS addr_longitude,
+             ua.postal_code AS addr_postal_code
       FROM orders o
       JOIN restaurants r ON r.id = o.restaurant_id
       LEFT JOIN user_addresses ua ON ua.id = o.delivery_address_id
@@ -510,13 +590,25 @@ async function fetchOrderDetail(client: import('pg').PoolClient, orderId: string
       suburb: o.addr_suburb,
       city: o.addr_city,
       province: o.addr_province,
+      postalCode: o.addr_postal_code,
+      coordinates: o.addr_latitude != null && o.addr_longitude != null
+        ? {
+          latitude: parseFloat(String(o.addr_latitude)),
+          longitude: parseFloat(String(o.addr_longitude)),
+        }
+        : undefined,
+      formattedAddress: [o.addr_street, o.addr_suburb, o.addr_city, o.addr_province].filter(Boolean).join(', '),
     } : null,
     items: itemsRes.rows.map((i) => ({
       id: i.id,
+      menuItemId: i.menu_item_id,
+      menuItemName: i.item_name,
+      menuItemImage: i.item_image,
       name: i.item_name,
       image: i.item_image,
       quantity: i.quantity,
       unitPrice: parseFloat(i.unit_price),
+      totalPrice: parseFloat(i.unit_price) * i.quantity,
       addonIds: i.addon_ids,
       instructions: i.instructions,
     })),
@@ -528,6 +620,8 @@ function mapOrderRow(o: Record<string, unknown>) {
     id: o.id,
     status: o.status,
     restaurantId: o.restaurant_id,
+    restaurantName: o.restaurant_name,
+    restaurantLogo: o.restaurant_logo,
     subtotal: parseFloat(o.subtotal as string),
     deliveryFee: parseFloat(o.delivery_fee as string),
     serviceFee: parseFloat(o.service_fee as string),
@@ -537,8 +631,12 @@ function mapOrderRow(o: Record<string, unknown>) {
     paymentStatus: o.payment_status,
     couponCode: o.coupon_code,
     deliveryNotes: o.delivery_notes,
+    estimatedDeliveryTime: o.estimated_delivery_minutes != null
+      ? parseInt(String(o.estimated_delivery_minutes), 10)
+      : undefined,
     placedAt: o.placed_at,
     confirmedAt: o.confirmed_at,
+    cancelledAt: o.cancelled_at,
     restaurant: {
       name: o.restaurant_name,
       logo: o.restaurant_logo,
