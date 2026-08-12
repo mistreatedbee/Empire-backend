@@ -13,12 +13,14 @@ function checkoutSecret(): string {
 export interface PayfastCheckoutSession {
   params: Record<string, string>;
   actionUrl: string;
+  signature?: string;
 }
 
 export function createPayfastCheckoutToken(session: PayfastCheckoutSession): string {
   const body = JSON.stringify({
     params: session.params,
     actionUrl: session.actionUrl,
+    signature: session.signature,
     exp: Date.now() + TTL_MS,
   });
   const sig = crypto.createHmac('sha256', checkoutSecret()).update(body).digest('hex');
@@ -37,13 +39,14 @@ export function parsePayfastCheckoutToken(token: string): PayfastCheckoutSession
     const data = JSON.parse(parsed.body) as {
       params: Record<string, string>;
       actionUrl: string;
+      signature?: string;
       exp: number;
     };
     if (!data.params || !data.actionUrl || typeof data.exp !== 'number' || data.exp < Date.now()) {
       return null;
     }
 
-    return { params: data.params, actionUrl: data.actionUrl };
+    return { params: data.params, actionUrl: data.actionUrl, signature: data.signature };
   } catch {
     return null;
   }
@@ -110,8 +113,9 @@ export function buildPayFastCheckoutFormHtml(
 export function buildPayfastCheckoutPage(
   params: Record<string, string>,
   actionUrl: string,
-  passphrase?: string,
+  options?: { signature?: string; passphrase?: string },
 ): string {
-  const signature = buildPayFastCheckoutSignature(params, passphrase);
+  const signature = options?.signature
+    ?? buildPayFastCheckoutSignature(params, options?.passphrase);
   return buildPayFastCheckoutFormHtml(actionUrl, params, signature);
 }

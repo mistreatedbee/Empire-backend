@@ -5,6 +5,7 @@ import { requireAuth, AuthRequest } from '../middleware/auth';
 import { ok, fail } from '../utils/response';
 import {
   buildPayFastItnSignature,
+  buildPayFastCheckoutSignature,
 } from '../utils/payfast';
 import {
   buildPayfastCheckoutPage,
@@ -15,17 +16,24 @@ import { notifyOrderDispatchable, notifyRestaurantNewOrder } from '../utils/orde
 
 const router = Router();
 
-const SANDBOX = process.env.PAYFAST_SANDBOX === 'true';
+const MERCHANT_ID = process.env.PAYFAST_MERCHANT_ID ?? '10000100';
+const MERCHANT_KEY = process.env.PAYFAST_MERCHANT_KEY ?? '46f0cd694581a';
+
+/** Sandbox unless explicitly disabled. Test merchant id always uses sandbox. */
+function isPayfastSandbox(): boolean {
+  if (process.env.PAYFAST_SANDBOX === 'true') return true;
+  if (process.env.PAYFAST_SANDBOX === 'false') return false;
+  return MERCHANT_ID === '10000100';
+}
+
+const SANDBOX = isPayfastSandbox();
 const PAYFAST_URL = SANDBOX
   ? 'https://sandbox.payfast.co.za/eng/process'
   : 'https://www.payfast.co.za/eng/process';
-const MERCHANT_ID = process.env.PAYFAST_MERCHANT_ID ?? '10000100';
-const MERCHANT_KEY = process.env.PAYFAST_MERCHANT_KEY ?? '46f0cd694581a';
 
 function resolvePayfastPassphrase(): string {
   const fromEnv = process.env.PAYFAST_PASSPHRASE?.trim();
   if (fromEnv) return fromEnv;
-  // Sandbox test merchant always uses this passphrase unless overridden above.
   if (SANDBOX) return 'jt7NOE43FZPn';
   return '';
 }
@@ -77,7 +85,10 @@ router.get('/payfast/checkout/:token', (req: Request, res: Response) => {
 
   res
     .type('html')
-    .send(buildPayfastCheckoutPage(session.params, session.actionUrl, PASSPHRASE || undefined));
+    .send(buildPayfastCheckoutPage(session.params, session.actionUrl, {
+      signature: session.signature,
+      passphrase: PASSPHRASE || undefined,
+    }));
 });
 
 // ─── PayFast ──────────────────────────────────────────────────────────────────
@@ -122,9 +133,10 @@ router.post('/payfast/initiate', requireAuth, async (req: AuthRequest, res: Resp
       item_name: `Empire Order ${String(orderId).slice(0, 8)}`,
     };
 
-    const token = createPayfastCheckoutToken({ params, actionUrl: PAYFAST_URL });
+    const signature = buildPayFastCheckoutSignature(params, PASSPHRASE || undefined);
+    const token = createPayfastCheckoutToken({ params, actionUrl: PAYFAST_URL, signature });
     logger.info(
-      { sandbox: SANDBOX, merchantId: MERCHANT_ID, hasPassphrase: Boolean(PASSPHRASE) },
+      { sandbox: SANDBOX, merchantId: MERCHANT_ID, hasPassphrase: Boolean(PASSPHRASE), payfastHost: SANDBOX ? 'sandbox' : 'live' },
       'payfast initiate',
     );
 
@@ -289,7 +301,8 @@ router.post('/wallet/topup', requireAuth, async (req: AuthRequest, res: Response
       amount: amount.toFixed(2),
       item_name: 'Empire Wallet Top-up',
     };
-    const token = createPayfastCheckoutToken({ params, actionUrl: PAYFAST_URL });
+    const signature = buildPayFastCheckoutSignature(params, PASSPHRASE || undefined);
+    const token = createPayfastCheckoutToken({ params, actionUrl: PAYFAST_URL, signature });
 
     ok(res, { redirectUrl: `${BACKEND_URL}/payments/payfast/checkout/${token}` });
   } catch (err) {
