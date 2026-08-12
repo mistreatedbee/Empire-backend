@@ -1,45 +1,17 @@
 import { pool } from '../db';
 import { notify } from '../utils/notify';
+import { logger } from '../utils/logger';
 
-interface Transition {
-  from: string;
-  to: string;
-  afterMinutes: number;
-  timestampCol?: string;
-  push: { title: string; body: string };
-}
-
-const TRANSITIONS: Transition[] = [
-  {
-    from: 'confirmed', to: 'preparing', afterMinutes: 2,
-    push: { title: 'Being Prepared 👨‍🍳', body: 'The restaurant is preparing your order.' },
-  },
-  {
-    from: 'preparing', to: 'picked_up', afterMinutes: 5,
-    timestampCol: 'picked_up_at',
-    push: { title: 'Driver Picked Up 🛵', body: 'Your order has been picked up by the driver.' },
-  },
-  {
-    from: 'picked_up', to: 'on_way', afterMinutes: 2,
-    push: { title: 'On the Way! 🚀', body: 'Your driver is heading to you.' },
-  },
-  {
-    from: 'on_way', to: 'delivered', afterMinutes: 8,
-    timestampCol: 'delivered_at',
-    push: { title: 'Delivered! 🎊', body: 'Your order has been delivered. Enjoy your meal!' },
-  },
-];
-
+/** Only auto-confirms cash-on-delivery orders still at `placed`. Status transitions are manual (restaurant + driver). */
 export function startOrderAdvanceJob(): void {
-  advanceOrders().catch(console.error);
-  setInterval(() => advanceOrders().catch(console.error), 30_000);
-  console.log('Order advance job started.');
+  void confirmCodOrders();
+  setInterval(() => { void confirmCodOrders(); }, 30_000);
+  console.log('Order COD confirm job started (auto-advance disabled).');
 }
 
-async function advanceOrders(): Promise<void> {
+async function confirmCodOrders(): Promise<void> {
   const client = await pool.connect();
   try {
-    // Auto-confirm COD orders still sitting at 'placed'
     const codRows = await client.query(`
       UPDATE orders
       SET status = 'confirmed', confirmed_at = NOW(), status_updated_at = NOW()
@@ -48,30 +20,16 @@ async function advanceOrders(): Promise<void> {
       RETURNING id, user_id
     `);
     for (const r of codRows.rows) {
-      await notify(r.user_id as string, 'order_update',
-        'Order Confirmed! 🎉', 'Your order has been confirmed and is being prepared.',
-        { orderId: r.id, status: 'confirmed' });
-    }
-
-    // Advance through each lifecycle transition
-    for (const t of TRANSITIONS) {
-      const extraSet = t.timestampCol ? `, ${t.timestampCol} = NOW()` : '';
-      const rows = await client.query(`
-        UPDATE orders
-        SET status = $1, status_updated_at = NOW()${extraSet}
-        WHERE status = $2
-          AND status_updated_at <= NOW() - ($3 || ' minutes')::INTERVAL
-        RETURNING id, user_id
-      `, [t.to, t.from, t.afterMinutes]);
-
-      for (const r of rows.rows) {
-        await notify(r.user_id as string, 'order_update',
-          t.push.title, t.push.body,
-          { orderId: r.id, status: t.to });
-      }
+      await notify(
+        r.user_id as string,
+        'order_update',
+        'Order Confirmed!',
+        'Your cash order has been confirmed and sent to the restaurant.',
+        { orderId: r.id, status: 'confirmed' },
+      );
     }
   } catch (err) {
-    console.error('orderAdvance error:', err);
+    logger.error({ err }, 'orderAdvance COD confirm error');
   } finally {
     client.release();
   }

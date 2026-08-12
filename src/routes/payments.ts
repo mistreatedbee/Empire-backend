@@ -11,6 +11,7 @@ import {
   createPayfastCheckoutToken,
   parsePayfastCheckoutToken,
 } from '../utils/payfastCheckout';
+import { notifyOrderDispatchable, notifyRestaurantNewOrder } from '../utils/orderNotifications';
 
 const router = Router();
 
@@ -172,6 +173,18 @@ router.post('/payfast/notify', async (req: Request, res: Response) => {
            WHERE id=$1`,
           [m_payment_id]
         );
+        void notifyOrderDispatchable(m_payment_id as string);
+        const paidOrder = await pool.query(
+          'SELECT restaurant_id, total FROM orders WHERE id=$1',
+          [m_payment_id],
+        );
+        if (paidOrder.rows.length) {
+          void notifyRestaurantNewOrder(
+            paidOrder.rows[0].restaurant_id as string,
+            m_payment_id as string,
+            parseFloat(String(paidOrder.rows[0].total)),
+          );
+        }
         await pool.query(
           `INSERT INTO payment_transactions (order_id, provider, external_id, amount, status, raw_payload)
            VALUES ($1, 'payfast', $2, $3, 'complete', $4)
@@ -347,6 +360,18 @@ router.post('/wallet/pay', requireAuth, async (req: AuthRequest, res: Response) 
       await client.query('COMMIT');
       const newBalance = balance - total;
       ok(res, { success: true, newBalance });
+      void notifyOrderDispatchable(orderId);
+      const paidOrder = await pool.query(
+        'SELECT restaurant_id, total FROM orders WHERE id=$1',
+        [orderId],
+      );
+      if (paidOrder.rows.length) {
+        void notifyRestaurantNewOrder(
+          paidOrder.rows[0].restaurant_id as string,
+          orderId,
+          parseFloat(String(paidOrder.rows[0].total)),
+        );
+      }
     } catch (innerErr) {
       await client.query('ROLLBACK');
       throw innerErr;

@@ -6,6 +6,7 @@ import { requireAuth, AuthRequest } from '../middleware/auth';
 import { ok, fail } from '../utils/response';
 import { sendPushToUser } from '../utils/push';
 import { quoteOrder } from '../utils/orderPricing';
+import { notifyOrderDispatchable, notifyRestaurantNewOrder } from '../utils/orderNotifications';
 
 const router = Router();
 
@@ -249,6 +250,10 @@ router.post('/', requireAuth, async (req: AuthRequest, res: Response) => {
       const body = `Your order from ${restaurantName} has been placed and is awaiting confirmation.`;
       void sendPushToUser(req.userId!, title, body, { type: 'order_update', orderId });
       void insertNotification(req.userId!, 'order_placed', title, body, { orderId });
+      void notifyRestaurantNewOrder(restaurantId, orderId, total);
+      if (paymentMethod === 'cash') {
+        void notifyOrderDispatchable(orderId);
+      }
     } catch (innerErr) {
       await client.query('ROLLBACK');
       throw innerErr;
@@ -274,8 +279,14 @@ router.get('/', requireAuth, async (req: AuthRequest, res: Response) => {
     `;
     const params: unknown[] = [req.userId];
     if (status) {
-      params.push(status);
-      sql += ` AND o.status = $${params.length}`;
+      const statuses = status.split(',').map((s) => s.trim()).filter(Boolean);
+      if (statuses.length === 1) {
+        params.push(statuses[0]);
+        sql += ` AND o.status = $${params.length}`;
+      } else if (statuses.length > 1) {
+        params.push(statuses);
+        sql += ` AND o.status = ANY($${params.length}::text[])`;
+      }
     }
     sql += ' ORDER BY o.placed_at DESC';
     const result = await pool.query(sql, params);

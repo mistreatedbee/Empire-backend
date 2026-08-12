@@ -192,7 +192,7 @@ router.get('/deliveries/available', requireDriver, async (req: AuthRequest, res:
        LEFT JOIN user_addresses ua ON ua.id = o.delivery_address_id
        JOIN users u ON u.id = o.user_id
        WHERE o.driver_id IS NULL
-         AND o.status IN ('placed','confirmed')
+         AND o.status IN ('placed','confirmed','preparing','ready')
          AND NOT EXISTS (
            SELECT 1 FROM driver_assignments da
            WHERE da.order_id = o.id AND da.driver_id = $1
@@ -290,7 +290,7 @@ router.post('/deliveries/:id/accept', requireDriver, async (req: AuthRequest, re
       await client.query('BEGIN');
 
       const orderRes = await client.query(
-        `SELECT id, delivery_fee, status FROM orders WHERE id=$1 AND driver_id IS NULL AND status IN ('placed','confirmed') FOR UPDATE`,
+        `SELECT id, delivery_fee, status FROM orders WHERE id=$1 AND driver_id IS NULL AND status IN ('placed','confirmed','preparing','ready') FOR UPDATE`,
         [orderId]
       );
       if (!orderRes.rows.length) {
@@ -302,7 +302,7 @@ router.post('/deliveries/:id/accept', requireDriver, async (req: AuthRequest, re
       const payout = await driverPayoutForFee(parseFloat(String(orderRes.rows[0].delivery_fee)));
 
       await client.query(
-        `UPDATE orders SET driver_id=$1, status='confirmed' WHERE id=$2`,
+        `UPDATE orders SET driver_id=$1, status=CASE WHEN status='placed' THEN 'confirmed' ELSE status END WHERE id=$2`,
         [req.userId, orderId]
       );
       await client.query(
@@ -323,7 +323,7 @@ router.post('/deliveries/:id/accept', requireDriver, async (req: AuthRequest, re
       client.release();
     }
 
-    void notifyCustomer(orderId, 'Driver Assigned', 'A driver is on the way to pick up your order.', 'order_update');
+    void notifyCustomer(orderId, 'Driver Accepted', 'A driver accepted your order and is heading to the restaurant.', 'order_update');
   } catch (err) {
     logger.error({ err }, 'POST /drivers/deliveries/:id/accept');
     fail(res, 500, 'SERVER_ERROR', 'Something went wrong.');
@@ -353,7 +353,8 @@ router.post('/deliveries/:id/pickup', requireDriver, async (req: AuthRequest, re
     const orderId = req.params.id;
     const [, assignRes] = await Promise.all([
       pool.query(
-        `UPDATE orders SET status='picked_up' WHERE id=$1 AND driver_id=$2 AND status='confirmed'`,
+        `UPDATE orders SET status='on_way', picked_up_at=NOW(), status_updated_at=NOW()
+         WHERE id=$1 AND driver_id=$2 AND status IN ('confirmed','preparing','ready')`,
         [orderId, req.userId]
       ),
       pool.query(
@@ -367,7 +368,7 @@ router.post('/deliveries/:id/pickup', requireDriver, async (req: AuthRequest, re
     }
     ok(res, { orderId, pickedUpAt: assignRes.rows[0].picked_up_at });
 
-    void notifyCustomer(orderId, 'Order Picked Up', 'Your order is on the way! Estimated arrival in ~20 minutes.', 'order_update');
+    void notifyCustomer(orderId, 'On the Way', 'Your driver picked up your order and is heading to you.', 'order_update');
   } catch (err) {
     logger.error({ err }, 'POST /drivers/deliveries/:id/pickup');
     fail(res, 500, 'SERVER_ERROR', 'Something went wrong.');

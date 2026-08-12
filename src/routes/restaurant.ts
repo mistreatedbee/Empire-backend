@@ -4,6 +4,7 @@ import { pool } from '../db';
 import { requireRestaurant, AuthRequest } from '../middleware/auth';
 import { ok, fail } from '../utils/response';
 import { sendPushToUser } from '../utils/push';
+import { notifyOnlineDriversNewDelivery } from '../utils/orderNotifications';
 
 const router = Router();
 
@@ -220,11 +221,26 @@ async function updateOrderStatus(
   res: Response,
   newStatus: string,
   pushTitle: string,
-  pushBody: string
+  pushBody: string,
+  allowedFrom: string[] = [],
 ) {
   const restaurantId = await getMyRestaurant(req.userId!);
   if (!restaurantId) {
     fail(res, 404, 'NOT_FOUND', 'No restaurant linked to this account.');
+    return;
+  }
+
+  const current = await pool.query(
+    `SELECT id, user_id, status FROM orders WHERE id=$1 AND restaurant_id=$2`,
+    [req.params.id, restaurantId],
+  );
+  if (!current.rows.length) {
+    fail(res, 404, 'NOT_FOUND', 'Order not found.');
+    return;
+  }
+  const fromStatus = current.rows[0].status as string;
+  if (allowedFrom.length && !allowedFrom.includes(fromStatus)) {
+    fail(res, 409, 'INVALID_STATUS', `Cannot move order from ${fromStatus} to ${newStatus}.`);
     return;
   }
 
@@ -249,12 +265,20 @@ async function updateOrderStatus(
       [customerId, 'order_update', pushTitle, pushBody, JSON.stringify({ orderId: req.params.id })]
     );
   } catch { /* non-fatal */ }
+
+  if (newStatus === 'ready') {
+    const restRow = await pool.query('SELECT name FROM restaurants WHERE id=$1', [restaurantId]);
+    void notifyOnlineDriversNewDelivery(
+      req.params.id,
+      String(restRow.rows[0]?.name ?? 'Restaurant'),
+    );
+  }
 }
 
 // PUT /restaurant/orders/:id/confirm
 router.put('/orders/:id/confirm', requireRestaurant, async (req: AuthRequest, res: Response) => {
   try {
-    await updateOrderStatus(req, res, 'confirmed', 'Order Confirmed!', 'The restaurant has confirmed your order and is getting started.');
+    await updateOrderStatus(req, res, 'confirmed', 'Order Confirmed!', 'The restaurant has confirmed your order and is getting started.', ['placed', 'confirmed']);
   } catch (err) {
     logger.error({ err }, 'PUT /restaurant/orders/:id/confirm');
     fail(res, 500, 'SERVER_ERROR', 'Something went wrong.');
@@ -264,7 +288,7 @@ router.put('/orders/:id/confirm', requireRestaurant, async (req: AuthRequest, re
 // PUT /restaurant/orders/:id/preparing
 router.put('/orders/:id/preparing', requireRestaurant, async (req: AuthRequest, res: Response) => {
   try {
-    await updateOrderStatus(req, res, 'preparing', 'Order Being Prepared', 'Your food is now being prepared!');
+    await updateOrderStatus(req, res, 'preparing', 'Order Being Prepared', 'Your food is now being prepared!', ['confirmed', 'placed']);
   } catch (err) {
     logger.error({ err }, 'PUT /restaurant/orders/:id/preparing');
     fail(res, 500, 'SERVER_ERROR', 'Something went wrong.');
@@ -274,7 +298,7 @@ router.put('/orders/:id/preparing', requireRestaurant, async (req: AuthRequest, 
 // PUT /restaurant/orders/:id/ready
 router.put('/orders/:id/ready', requireRestaurant, async (req: AuthRequest, res: Response) => {
   try {
-    await updateOrderStatus(req, res, 'ready', 'Order Ready for Pickup', 'Your order is packed and ready for the driver.');
+    await updateOrderStatus(req, res, 'ready', 'Order Ready for Pickup', 'Your order is packed and ready for the driver.', ['preparing', 'confirmed']);
   } catch (err) {
     logger.error({ err }, 'PUT /restaurant/orders/:id/ready');
     fail(res, 500, 'SERVER_ERROR', 'Something went wrong.');
