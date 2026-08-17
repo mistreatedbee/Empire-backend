@@ -355,7 +355,7 @@ async function getTrackingData(orderId: string, userId: string) {
             d.location_lat, d.location_lng, d.rating AS driver_rating, d.vehicle_type,
             d.vehicle_make, d.vehicle_reg,
             u.first_name AS driver_first_name, u.last_name AS driver_last_name,
-            u.phone AS driver_phone, u.avatar_url AS driver_avatar
+            u.phone AS driver_phone, u.profile_image AS driver_avatar
      FROM orders o
      LEFT JOIN user_addresses ua ON ua.id = o.delivery_address_id
      LEFT JOIN restaurants r ON r.id = o.restaurant_id
