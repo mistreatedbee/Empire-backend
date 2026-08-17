@@ -383,4 +383,18 @@ ALTER TABLE driver_applications ADD COLUMN IF NOT EXISTS license_plate_photo_url
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS cancel_reason TEXT;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS cancellation_fee NUMERIC(10,2) NOT NULL DEFAULT 0;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS cancelled_by VARCHAR(20);
+
+-- Phase 18: restaurants.updated_at was used by PUT /restaurant/me (SET
+-- updated_at=NOW()) but was never in the CREATE TABLE IF NOT EXISTS
+-- restaurants statement or any ALTER TABLE patch — on any DB where the
+-- table predates this column, every restaurant profile save (name,
+-- address, logo, cover image, delivery fee, delivery times, etc.) threw
+-- "column \"updated_at\" does not exist", surfaced to the app as a
+-- generic "Something went wrong." owner_id is used throughout
+-- restaurant.ts/orders.ts/admin.ts but was likewise never in this
+-- tracked migration (it must already exist live from an untracked
+-- one-off change) — added defensively so a fresh DB bootstrapped from
+-- this repo wouldn't silently break the same way.
+ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS owner_id UUID REFERENCES users(id);
 `;
