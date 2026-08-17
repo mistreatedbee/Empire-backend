@@ -397,4 +397,15 @@ ALTER TABLE orders ADD COLUMN IF NOT EXISTS cancelled_by VARCHAR(20);
 -- this repo wouldn't silently break the same way.
 ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
 ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS owner_id UUID REFERENCES users(id);
+
+-- Phase 19: driver_assignments.created_at is selected by getTrackingData()
+-- (GET /orders/:id/tracking and the SSE stream) as a fallback for
+-- driverAcceptedAt, but driver_assignments is not in this tracked migration
+-- at all (it exists live from an untracked one-off change, same as
+-- restaurants.owner_id above) and apparently predates this column — every
+-- tracking request was throwing "column da.created_at does not exist",
+-- confirmed live via Render logs: 500 on every /orders/:id/tracking call
+-- and the SSE stream aborting, leaving the customer app's tracking screen
+-- with no live status at all.
+ALTER TABLE driver_assignments ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
 `;
