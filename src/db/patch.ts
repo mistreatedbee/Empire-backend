@@ -18,6 +18,18 @@ const SCHEMA_PATCHES = [
   `ALTER TABLE public.users ADD COLUMN IF NOT EXISTS suspension_reason TEXT`,
   // NULL = no expiry restriction; set to time-box a client's access (e.g. 1-month trial)
   `ALTER TABLE public.users ADD COLUMN IF NOT EXISTS subscription_expires_at TIMESTAMPTZ`,
+  // Deepened driver onboarding — SA e-hailing-standard vetting fields, plus
+  // fields the mobile app already collected but silently dropped on submit.
+  `ALTER TABLE public.driver_applications ADD COLUMN IF NOT EXISTS years_experience INT`,
+  `ALTER TABLE public.driver_applications ADD COLUMN IF NOT EXISTS prdp_number VARCHAR(50)`,
+  `ALTER TABLE public.driver_applications ADD COLUMN IF NOT EXISTS prdp_expiry DATE`,
+  `ALTER TABLE public.driver_applications ADD COLUMN IF NOT EXISTS vehicle_colour VARCHAR(50)`,
+  `ALTER TABLE public.driver_applications ADD COLUMN IF NOT EXISTS bank_account_type VARCHAR(20)`,
+  `ALTER TABLE public.driver_applications ADD COLUMN IF NOT EXISTS emergency_contact_name VARCHAR(200)`,
+  `ALTER TABLE public.driver_applications ADD COLUMN IF NOT EXISTS emergency_contact_phone VARCHAR(20)`,
+  `ALTER TABLE public.driver_applications ADD COLUMN IF NOT EXISTS criminal_record_consent BOOLEAN NOT NULL DEFAULT false`,
+  `ALTER TABLE public.driver_applications ADD COLUMN IF NOT EXISTS vehicle_photo_url VARCHAR(500)`,
+  `ALTER TABLE public.driver_applications ADD COLUMN IF NOT EXISTS license_plate_photo_url VARCHAR(500)`,
 ];
 
 const RLS_TABLES = [

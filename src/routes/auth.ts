@@ -83,6 +83,47 @@ router.post('/sync', async (req: Request, res: Response) => {
   }
 });
 
+// POST /auth/role — upgrade an already-authenticated account's role
+// (e.g. an existing customer starting the driver-signup or restaurant-signup
+// flow while logged in). /auth/sync only creates a new user or returns an
+// existing one unchanged, so it can never move a customer to driver/restaurant
+// — this is the dedicated path for that transition.
+router.post('/role', requireAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const { role } = req.body as { role?: string };
+    if (role !== 'driver' && role !== 'restaurant') {
+      fail(res, 400, 'VALIDATION_ERROR', 'role must be "driver" or "restaurant".');
+      return;
+    }
+
+    const userRow = await pool.query('SELECT * FROM users WHERE id = $1', [req.userId]);
+    if (!userRow.rows.length) {
+      fail(res, 404, 'NOT_FOUND', 'User not found.');
+      return;
+    }
+    const current = userRow.rows[0];
+
+    if (current.role === role) {
+      ok(res, mapUser(current));
+      return;
+    }
+    if (current.role !== 'customer') {
+      fail(res, 403, 'FORBIDDEN', `Accounts with role "${current.role as string}" cannot switch to "${role}".`);
+      return;
+    }
+
+    const result = await pool.query(
+      `UPDATE users SET role = $1, approval_status = 'pending', updated_at = NOW()
+       WHERE id = $2 RETURNING *`,
+      [role, req.userId]
+    );
+    ok(res, mapUser(result.rows[0]));
+  } catch (err) {
+    logger.error({ err }, 'POST /auth/role');
+    fail(res, 500, 'SERVER_ERROR', 'Something went wrong. Please try again.');
+  }
+});
+
 // GET /auth/me
 router.get('/me', requireAuth, async (req: AuthRequest, res: Response) => {
   try {

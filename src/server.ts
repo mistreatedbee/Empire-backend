@@ -365,4 +365,17 @@ WHERE NOT EXISTS (SELECT 1 FROM pricing_rules WHERE name = 'default');
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS small_order_fee NUMERIC(10,2) NOT NULL DEFAULT 0;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS distance_km NUMERIC(8,2);
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS estimated_delivery_minutes INTEGER;
+
+-- Phase 16: deepened driver onboarding — SA e-hailing-standard vetting fields,
+-- plus fields the mobile app already collected but silently dropped on submit.
+ALTER TABLE driver_applications ADD COLUMN IF NOT EXISTS years_experience INT;
+ALTER TABLE driver_applications ADD COLUMN IF NOT EXISTS prdp_number VARCHAR(50);
+ALTER TABLE driver_applications ADD COLUMN IF NOT EXISTS prdp_expiry DATE;
+ALTER TABLE driver_applications ADD COLUMN IF NOT EXISTS vehicle_colour VARCHAR(50);
+ALTER TABLE driver_applications ADD COLUMN IF NOT EXISTS bank_account_type VARCHAR(20);
+ALTER TABLE driver_applications ADD COLUMN IF NOT EXISTS emergency_contact_name VARCHAR(200);
+ALTER TABLE driver_applications ADD COLUMN IF NOT EXISTS emergency_contact_phone VARCHAR(20);
+ALTER TABLE driver_applications ADD COLUMN IF NOT EXISTS criminal_record_consent BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE driver_applications ADD COLUMN IF NOT EXISTS vehicle_photo_url VARCHAR(500);
+ALTER TABLE driver_applications ADD COLUMN IF NOT EXISTS license_plate_photo_url VARCHAR(500);
 `;

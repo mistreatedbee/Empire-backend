@@ -67,28 +67,41 @@ router.post('/driver', requireAuth, async (req: AuthRequest, res: Response) => {
     }
 
     const {
-      idNumber, dateOfBirth, vehicleType, vehicleMake, vehicleModel,
-      vehicleYear, vehicleReg, bankName, bankAccountNo, bankHolder, bankBranch,
+      idNumber, dateOfBirth, yearsExperience, prdpNumber, prdpExpiry,
+      vehicleType, vehicleMake, vehicleModel, vehicleYear, vehicleReg, vehicleColour,
+      bankName, bankAccountNo, bankHolder, bankBranch, bankAccountType,
+      emergencyContactName, emergencyContactPhone, criminalRecordConsent,
       idDocumentUrl, driversLicenseUrl, vehicleRegistrationUrl,
+      vehiclePhotoUrl, licensePlatePhotoUrl,
     } = req.body as Record<string, string>;
 
     await pool.query(
       `INSERT INTO driver_applications
-         (user_id, id_number, date_of_birth, vehicle_type, vehicle_make, vehicle_model,
-          vehicle_year, vehicle_reg, bank_name, bank_account_no, bank_holder, bank_branch,
-          id_document_url, drivers_license_url, vehicle_registration_url)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+         (user_id, id_number, date_of_birth, years_experience, prdp_number, prdp_expiry,
+          vehicle_type, vehicle_make, vehicle_model, vehicle_year, vehicle_reg, vehicle_colour,
+          bank_name, bank_account_no, bank_holder, bank_branch, bank_account_type,
+          emergency_contact_name, emergency_contact_phone, criminal_record_consent,
+          id_document_url, drivers_license_url, vehicle_registration_url,
+          vehicle_photo_url, license_plate_photo_url)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)
        ON CONFLICT (user_id) DO UPDATE SET
-         id_number=$2, date_of_birth=$3, vehicle_type=$4, vehicle_make=$5, vehicle_model=$6,
-         vehicle_year=$7, vehicle_reg=$8, bank_name=$9, bank_account_no=$10,
-         bank_holder=$11, bank_branch=$12, id_document_url=$13, drivers_license_url=$14,
-         vehicle_registration_url=$15, submitted_at=NOW(), status='pending'`,
+         id_number=$2, date_of_birth=$3, years_experience=$4, prdp_number=$5, prdp_expiry=$6,
+         vehicle_type=$7, vehicle_make=$8, vehicle_model=$9, vehicle_year=$10, vehicle_reg=$11,
+         vehicle_colour=$12, bank_name=$13, bank_account_no=$14, bank_holder=$15, bank_branch=$16,
+         bank_account_type=$17, emergency_contact_name=$18, emergency_contact_phone=$19,
+         criminal_record_consent=$20, id_document_url=$21, drivers_license_url=$22,
+         vehicle_registration_url=$23, vehicle_photo_url=$24, license_plate_photo_url=$25,
+         submitted_at=NOW(), status='pending'`,
       [
-        userId, idNumber ?? null, dateOfBirth ?? null, vehicleType ?? null,
-        vehicleMake ?? null, vehicleModel ?? null, vehicleYear ? parseInt(vehicleYear) : null,
-        vehicleReg ?? null, bankName ?? null, bankAccountNo ?? null,
-        bankHolder ?? null, bankBranch ?? null,
+        userId, idNumber ?? null, dateOfBirth ?? null,
+        yearsExperience ? parseInt(yearsExperience) : null, prdpNumber ?? null, prdpExpiry ?? null,
+        vehicleType ?? null, vehicleMake ?? null, vehicleModel ?? null,
+        vehicleYear ? parseInt(vehicleYear) : null, vehicleReg ?? null, vehicleColour ?? null,
+        bankName ?? null, bankAccountNo ?? null, bankHolder ?? null, bankBranch ?? null,
+        bankAccountType ?? null, emergencyContactName ?? null, emergencyContactPhone ?? null,
+        (criminalRecordConsent as unknown) === true || (criminalRecordConsent as unknown) === 'true',
         idDocumentUrl ?? null, driversLicenseUrl ?? null, vehicleRegistrationUrl ?? null,
+        vehiclePhotoUrl ?? null, licensePlatePhotoUrl ?? null,
       ]
     );
 
