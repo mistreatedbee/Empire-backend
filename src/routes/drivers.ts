@@ -199,7 +199,7 @@ router.get('/deliveries/available', requireDriver, async (req: AuthRequest, res:
            SELECT 1 FROM driver_assignments da
            WHERE da.order_id = o.id AND da.driver_id = $1
          )
-       ORDER BY o.created_at ASC
+       ORDER BY o.placed_at ASC
        LIMIT 1`,
       [req.userId]
     );
