@@ -242,10 +242,17 @@ const AVAILABLE_DELIVERIES_SQL = `
   JOIN users u ON u.id = o.user_id
   WHERE o.driver_id IS NULL
     AND o.status IN ('placed','confirmed','preparing','ready')
+    AND o.status NOT IN ('delivered','cancelled','picked_up','on_way','pending_payment')
+    AND NOT EXISTS (
+      SELECT 1 FROM driver_assignments da
+      WHERE da.order_id = o.id
+        AND da.status IN ('accepted', 'delivered')
+    )
     AND NOT EXISTS (
       SELECT 1 FROM driver_order_rejections dor
       WHERE dor.order_id = o.id AND dor.driver_id = $1
     )
+    AND o.placed_at >= NOW() - INTERVAL '48 hours'
   ORDER BY o.placed_at ASC
   LIMIT $2`;
 
