@@ -177,53 +177,67 @@ router.get('/stats/today', requireDriver, async (req: AuthRequest, res: Response
 
 // ─── Delivery dispatch ────────────────────────────────────────────────────────
 
-// GET /drivers/deliveries/available
+function mapAvailableDeliveryRow(row: Record<string, unknown>, payout: number) {
+  const addrParts = [row.customer_street, row.customer_suburb, row.customer_city].filter(Boolean);
+  return {
+    orderId: row.id,
+    restaurantName: row.restaurant_name,
+    restaurantAddress: row.restaurant_address ?? '',
+    restaurantLat: row.restaurant_lat != null ? parseFloat(String(row.restaurant_lat)) : null,
+    restaurantLng: row.restaurant_lng != null ? parseFloat(String(row.restaurant_lng)) : null,
+    customerName: `${row.customer_first_name ?? ''} ${row.customer_last_name ?? ''}`.trim(),
+    customerAddress: addrParts.join(', '),
+    customerPhone: row.customer_phone,
+    itemCount: Number(row.item_count ?? 0),
+    distanceKm: row.distance_km != null ? parseFloat(String(row.distance_km)) : null,
+    payout,
+    etaMinutes: 20,
+  };
+}
+
+const AVAILABLE_DELIVERIES_SQL = `
+  SELECT o.id, o.delivery_fee, o.subtotal, o.placed_at, o.distance_km,
+         r.name AS restaurant_name, r.address AS restaurant_address,
+         r.latitude AS restaurant_lat, r.longitude AS restaurant_lng,
+         ua.street AS customer_street, ua.suburb AS customer_suburb,
+         ua.city AS customer_city,
+         u.first_name AS customer_first_name, u.last_name AS customer_last_name,
+         u.phone AS customer_phone,
+         (SELECT COUNT(*) FROM order_items WHERE order_id=o.id) AS item_count
+  FROM orders o
+  JOIN restaurants r ON r.id = o.restaurant_id
+  LEFT JOIN user_addresses ua ON ua.id = o.delivery_address_id
+  JOIN users u ON u.id = o.user_id
+  WHERE o.driver_id IS NULL
+    AND o.status IN ('placed','confirmed','preparing','ready')
+    AND NOT EXISTS (
+      SELECT 1 FROM driver_order_rejections dor
+      WHERE dor.order_id = o.id AND dor.driver_id = $1
+    )
+  ORDER BY o.placed_at ASC
+  LIMIT $2`;
+
+// GET /drivers/deliveries/available — returns up to 5 open requests for this driver
 router.get('/deliveries/available', requireDriver, async (req: AuthRequest, res: Response) => {
   try {
-    const result = await pool.query(
-      `SELECT o.id, o.delivery_fee, o.subtotal, o.distance_km,
-              r.name AS restaurant_name, r.address AS restaurant_address,
-              r.latitude AS restaurant_lat, r.longitude AS restaurant_lng,
-              ua.street AS customer_street, ua.suburb AS customer_suburb,
-              ua.city AS customer_city,
-              u.first_name AS customer_first_name, u.last_name AS customer_last_name,
-              u.phone AS customer_phone,
-              (SELECT COUNT(*) FROM order_items WHERE order_id=o.id) AS item_count
-       FROM orders o
-       JOIN restaurants r ON r.id = o.restaurant_id
-       LEFT JOIN user_addresses ua ON ua.id = o.delivery_address_id
-       JOIN users u ON u.id = o.user_id
-       WHERE o.driver_id IS NULL
-         AND o.status IN ('placed','confirmed','preparing','ready')
-         AND NOT EXISTS (
-           SELECT 1 FROM driver_assignments da
-           WHERE da.order_id = o.id AND da.driver_id = $1
-         )
-       ORDER BY o.placed_at ASC
-       LIMIT 1`,
-      [req.userId]
+    const activeRes = await pool.query(
+      `SELECT id FROM orders WHERE driver_id=$1 AND status NOT IN ('delivered','cancelled') LIMIT 1`,
+      [req.userId],
     );
-    if (!result.rows.length) {
-      ok(res, null);
+    if (activeRes.rows.length) {
+      ok(res, []);
       return;
     }
-    const row = result.rows[0];
-    const payout = await driverPayoutForFee(parseFloat(String(row.delivery_fee)));
-    const addrParts = [row.customer_street, row.customer_suburb, row.customer_city].filter(Boolean);
-    ok(res, {
-      orderId: row.id,
-      restaurantName: row.restaurant_name,
-      restaurantAddress: row.restaurant_address ?? '',
-      restaurantLat: row.restaurant_lat != null ? parseFloat(row.restaurant_lat) : null,
-      restaurantLng: row.restaurant_lng != null ? parseFloat(row.restaurant_lng) : null,
-      customerName: `${row.customer_first_name} ${row.customer_last_name}`.trim(),
-      customerAddress: addrParts.join(', '),
-      customerPhone: row.customer_phone,
-      itemCount: Number(row.item_count ?? 0),
-      distanceKm: row.distance_km != null ? parseFloat(row.distance_km) : null,
-      payout,
-      etaMinutes: 20,
-    });
+
+    const limit = Math.min(Math.max(parseInt(String(req.query.limit ?? '5'), 10) || 5, 1), 10);
+    const result = await pool.query(AVAILABLE_DELIVERIES_SQL, [req.userId, limit]);
+    const deliveries = await Promise.all(
+      result.rows.map(async (row) => {
+        const payout = await driverPayoutForFee(parseFloat(String(row.delivery_fee)));
+        return mapAvailableDeliveryRow(row, payout);
+      }),
+    );
+    ok(res, deliveries);
   } catch (err) {
     logger.error({ err }, 'GET /drivers/deliveries/available');
     fail(res, 500, 'SERVER_ERROR', 'Something went wrong.');
@@ -314,16 +328,34 @@ router.post('/deliveries/:id/accept', requireDriver, async (req: AuthRequest, re
         return;
       }
 
+      const activeRes = await client.query(
+        `SELECT id FROM orders WHERE driver_id=$1 AND status NOT IN ('delivered','cancelled') FOR UPDATE`,
+        [req.userId],
+      );
+      if (activeRes.rows.length) {
+        await client.query('ROLLBACK');
+        fail(res, 409, 'CONFLICT', 'Finish your current delivery before accepting another.');
+        return;
+      }
+
       const payout = await driverPayoutForFee(parseFloat(String(orderRes.rows[0].delivery_fee)));
 
       await client.query(
         `UPDATE orders SET driver_id=$1, status=CASE WHEN status='placed' THEN 'confirmed' ELSE status END WHERE id=$2`,
         [req.userId, orderId]
       );
-      await client.query(
-        `INSERT INTO driver_assignments (driver_id, order_id, payout) VALUES ($1,$2,$3)`,
+      const assignRes = await client.query(
+        `INSERT INTO driver_assignments (driver_id, order_id, payout, status, accepted_at)
+         VALUES ($1,$2,$3,'accepted',NOW())
+         ON CONFLICT (driver_id, order_id) DO NOTHING
+         RETURNING id`,
         [req.userId, orderId, payout]
       );
+      if (!assignRes.rows.length) {
+        await client.query('ROLLBACK');
+        fail(res, 409, 'CONFLICT', 'You already responded to this order.');
+        return;
+      }
       await client.query(
         `INSERT INTO driver_transactions (driver_id, type, amount, description, order_id) VALUES ($1,'earning',$2,'Delivery payout',$3)`,
         [req.userId, payout, orderId]
@@ -350,8 +382,8 @@ router.post('/deliveries/:id/reject', requireDriver, async (req: AuthRequest, re
   try {
     const orderId = req.params.id;
     await pool.query(
-      `INSERT INTO driver_assignments (driver_id, order_id, payout, status)
-       VALUES ($1, $2, 0, 'rejected')
+      `INSERT INTO driver_order_rejections (driver_id, order_id)
+       VALUES ($1, $2)
        ON CONFLICT DO NOTHING`,
       [req.userId, orderId]
     );

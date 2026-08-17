@@ -398,14 +398,73 @@ ALTER TABLE orders ADD COLUMN IF NOT EXISTS cancelled_by VARCHAR(20);
 ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
 ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS owner_id UUID REFERENCES users(id);
 
--- Phase 19: driver_assignments.created_at is selected by getTrackingData()
--- (GET /orders/:id/tracking and the SSE stream) as a fallback for
--- driverAcceptedAt, but driver_assignments is not in this tracked migration
--- at all (it exists live from an untracked one-off change, same as
--- restaurants.owner_id above) and apparently predates this column — every
--- tracking request was throwing "column da.created_at does not exist",
--- confirmed live via Render logs: 500 on every /orders/:id/tracking call
--- and the SSE stream aborting, leaving the customer app's tracking screen
--- with no live status at all.
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS driver_id UUID REFERENCES users(id);
+
+CREATE TABLE IF NOT EXISTS drivers (
+  id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  vehicle_type VARCHAR(50),
+  vehicle_make VARCHAR(100),
+  vehicle_reg VARCHAR(50),
+  is_online BOOLEAN NOT NULL DEFAULT false,
+  location_lat NUMERIC(10,7),
+  location_lng NUMERIC(10,7),
+  rating NUMERIC(3,2) NOT NULL DEFAULT 5.0,
+  review_count INT NOT NULL DEFAULT 0,
+  total_trips INT NOT NULL DEFAULT 0,
+  completion_rate NUMERIC(5,2) NOT NULL DEFAULT 100,
+  acceptance_rate NUMERIC(5,2) NOT NULL DEFAULT 100,
+  wallet_balance NUMERIC(10,2) NOT NULL DEFAULT 0,
+  bank_name VARCHAR(100),
+  bank_account_no VARCHAR(50),
+  bank_account_type VARCHAR(50),
+  bank_holder_name VARCHAR(200),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS driver_assignments (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  driver_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  order_id UUID NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+  payout NUMERIC(10,2) NOT NULL DEFAULT 0,
+  status VARCHAR(20) NOT NULL DEFAULT 'accepted',
+  accepted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  picked_up_at TIMESTAMPTZ,
+  delivered_at TIMESTAMPTZ,
+  delivery_photo TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE(driver_id, order_id)
+);
+
+CREATE TABLE IF NOT EXISTS driver_order_rejections (
+  driver_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  order_id UUID NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+  rejected_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (driver_id, order_id)
+);
+
+CREATE TABLE IF NOT EXISTS driver_transactions (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  driver_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  type VARCHAR(30) NOT NULL,
+  amount NUMERIC(10,2) NOT NULL,
+  description TEXT,
+  order_id UUID REFERENCES orders(id),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_driver_assignments_order_id ON driver_assignments(order_id);
+CREATE INDEX IF NOT EXISTS idx_driver_order_rejections_order_id ON driver_order_rejections(order_id);
+CREATE INDEX IF NOT EXISTS idx_driver_transactions_driver_id ON driver_transactions(driver_id, created_at DESC);
+
+-- Phase 19: driver_assignments.created_at fallback for tracking (existing DBs)
 ALTER TABLE driver_assignments ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+
+-- Phase 20: driver_assignments accept/pickup columns (existing DBs bootstrapped without full schema)
+ALTER TABLE driver_assignments ADD COLUMN IF NOT EXISTS payout NUMERIC(10,2) NOT NULL DEFAULT 0;
+ALTER TABLE driver_assignments ADD COLUMN IF NOT EXISTS status VARCHAR(20) NOT NULL DEFAULT 'accepted';
+ALTER TABLE driver_assignments ADD COLUMN IF NOT EXISTS accepted_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+ALTER TABLE driver_assignments ADD COLUMN IF NOT EXISTS picked_up_at TIMESTAMPTZ;
+ALTER TABLE driver_assignments ADD COLUMN IF NOT EXISTS delivered_at TIMESTAMPTZ;
+ALTER TABLE driver_assignments ADD COLUMN IF NOT EXISTS delivery_photo TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_driver_assignments_driver_order ON driver_assignments(driver_id, order_id);
 `;
