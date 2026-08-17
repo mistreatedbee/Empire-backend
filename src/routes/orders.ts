@@ -273,7 +273,14 @@ router.get('/', requireAuth, async (req: AuthRequest, res: Response) => {
     const { status } = req.query as { status?: string };
     let sql = `
       SELECT o.*, r.name AS restaurant_name, r.logo AS restaurant_logo,
-             r.cover_image AS restaurant_cover
+             r.cover_image AS restaurant_cover,
+             (SELECT json_agg(json_build_object(
+                'id', oi.id, 'menuItemId', oi.menu_item_id, 'menuItemName', mi.name,
+                'menuItemImage', mi.image, 'quantity', oi.quantity, 'unitPrice', oi.unit_price,
+                'addonIds', oi.addon_ids, 'instructions', oi.instructions
+              ))
+              FROM order_items oi JOIN menu_items mi ON mi.id = oi.menu_item_id
+              WHERE oi.order_id = o.id) AS items
       FROM orders o
       JOIN restaurants r ON r.id = o.restaurant_id
       WHERE o.user_id = $1
@@ -291,7 +298,28 @@ router.get('/', requireAuth, async (req: AuthRequest, res: Response) => {
     }
     sql += ' ORDER BY o.placed_at DESC';
     const result = await pool.query(sql, params);
-    ok(res, result.rows.map(mapOrderRow));
+
+    // Resolve every order's item addon ids to names/prices in one batched query.
+    const flatItems = result.rows.flatMap((row) => row.items ?? []);
+    const resolvedAddons = await resolveAddonsForItems(
+      flatItems.map((i: { addonIds: unknown }) => ({ addon_ids: i.addonIds }))
+    );
+    let cursor = 0;
+
+    ok(res, result.rows.map((row) => ({
+      ...mapOrderRow(row),
+      items: (row.items ?? []).map((i: Record<string, unknown>) => ({
+        id: i.id,
+        menuItemId: i.menuItemId,
+        menuItemName: i.menuItemName,
+        menuItemImage: i.menuItemImage,
+        quantity: i.quantity,
+        unitPrice: i.unitPrice,
+        totalPrice: Number(i.unitPrice) * Number(i.quantity),
+        addons: resolvedAddons[cursor++],
+        instructions: i.instructions,
+      })),
+    })));
   } catch (err) {
     logger.error({ err }, 'list orders');
     fail(res, 500, 'SERVER_ERROR', 'Something went wrong.');
