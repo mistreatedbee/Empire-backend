@@ -5,6 +5,7 @@ import { requireRestaurant, AuthRequest } from '../middleware/auth';
 import { ok, fail } from '../utils/response';
 import { sendPushToUser } from '../utils/push';
 import { notifyOnlineDriversNewDelivery } from '../utils/orderNotifications';
+import { resolveAddonsForItems } from '../utils/resolveAddons';
 
 const router = Router();
 
@@ -182,9 +183,10 @@ router.get('/orders', requireRestaurant, async (req: AuthRequest, res: Response)
     const statuses = status ? status.split(',').map((s) => s.trim()) : null;
 
     let sql = `
-      SELECT o.id, o.status, o.total, o.placed_at, o.confirmed_at, o.delivery_notes,
+      SELECT o.id, o.status, o.subtotal, o.delivery_fee, o.service_fee, o.discount, o.total,
+             o.distance_km, o.placed_at, o.confirmed_at, o.delivery_notes,
              u.first_name || ' ' || u.last_name AS customer_name, u.phone AS customer_phone,
-             (SELECT json_agg(json_build_object('name', mi.name, 'quantity', oi.quantity, 'unitPrice', oi.unit_price))
+             (SELECT json_agg(json_build_object('name', mi.name, 'quantity', oi.quantity, 'unitPrice', oi.unit_price, 'addonIds', oi.addon_ids))
               FROM order_items oi JOIN menu_items mi ON mi.id = oi.menu_item_id
               WHERE oi.order_id = o.id) AS items
       FROM orders o
@@ -199,16 +201,34 @@ router.get('/orders', requireRestaurant, async (req: AuthRequest, res: Response)
     sql += ' ORDER BY o.placed_at DESC LIMIT 50';
 
     const result = await pool.query(sql, params);
+
+    // Resolve every order's item addon ids to names/prices in one batched query.
+    const flatItems = result.rows.flatMap((row) => row.items ?? []);
+    const resolvedAddons = await resolveAddonsForItems(
+      flatItems.map((i: { addonIds: unknown }) => ({ addon_ids: i.addonIds }))
+    );
+    let cursor = 0;
+
     ok(res, result.rows.map((row) => ({
       id: row.id,
       status: row.status,
+      subtotal: parseFloat(String(row.subtotal ?? '0')),
+      deliveryFee: parseFloat(String(row.delivery_fee ?? '0')),
+      serviceFee: parseFloat(String(row.service_fee ?? '0')),
+      discount: parseFloat(String(row.discount ?? '0')),
       total: parseFloat(String(row.total)),
+      distanceKm: row.distance_km != null ? parseFloat(String(row.distance_km)) : null,
       placedAt: row.placed_at,
       confirmedAt: row.confirmed_at,
       deliveryNotes: row.delivery_notes,
       customerName: row.customer_name,
       customerPhone: row.customer_phone,
-      items: row.items ?? [],
+      items: (row.items ?? []).map((i: Record<string, unknown>) => ({
+        name: i.name,
+        quantity: i.quantity,
+        unitPrice: i.unitPrice,
+        addons: resolvedAddons[cursor++],
+      })),
     })));
   } catch (err) {
     logger.error({ err }, 'GET /restaurant/orders');
@@ -301,6 +321,53 @@ router.put('/orders/:id/ready', requireRestaurant, async (req: AuthRequest, res:
     await updateOrderStatus(req, res, 'ready', 'Order Ready for Pickup', 'Your order is packed and ready for the driver.', ['preparing', 'confirmed']);
   } catch (err) {
     logger.error({ err }, 'PUT /restaurant/orders/:id/ready');
+    fail(res, 500, 'SERVER_ERROR', 'Something went wrong.');
+  }
+});
+
+// POST /restaurant/orders/:id/cancel — e.g. item out of stock. No fee is charged
+// to the customer on a restaurant-initiated cancellation (unlike the customer's
+// own cancel, which carries a fee once status is 'preparing').
+router.post('/orders/:id/cancel', requireRestaurant, async (req: AuthRequest, res: Response) => {
+  try {
+    const { reason } = req.body as { reason?: string };
+    if (!reason?.trim()) {
+      fail(res, 400, 'VALIDATION_ERROR', 'A cancellation reason is required.');
+      return;
+    }
+
+    const restaurantId = await getMyRestaurant(req.userId!);
+    if (!restaurantId) {
+      fail(res, 404, 'NOT_FOUND', 'No restaurant linked to this account.');
+      return;
+    }
+
+    const result = await pool.query(
+      `UPDATE orders
+       SET status='cancelled', cancelled_at=NOW(), cancel_reason=$3, cancelled_by='restaurant'
+       WHERE id=$1 AND restaurant_id=$2 AND status IN ('placed','confirmed','preparing')
+       RETURNING id, user_id`,
+      [req.params.id, restaurantId, reason.trim()]
+    );
+    if (!result.rows.length) {
+      fail(res, 400, 'CANNOT_CANCEL', 'Order cannot be cancelled at this stage.');
+      return;
+    }
+
+    ok(res, { cancelled: true });
+
+    const customerId = result.rows[0].user_id as string;
+    const title = 'Order Cancelled by Restaurant';
+    const body = `The restaurant cancelled your order. Reason: ${reason.trim()}`;
+    void sendPushToUser(customerId, title, body, { type: 'order_update', orderId: req.params.id });
+    try {
+      await pool.query(
+        `INSERT INTO notifications (user_id, type, title, body, data) VALUES ($1,$2,$3,$4,$5)`,
+        [customerId, 'order_cancelled', title, body, JSON.stringify({ orderId: req.params.id })]
+      );
+    } catch { /* non-fatal */ }
+  } catch (err) {
+    logger.error({ err }, 'POST /restaurant/orders/:id/cancel');
     fail(res, 500, 'SERVER_ERROR', 'Something went wrong.');
   }
 });

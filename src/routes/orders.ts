@@ -7,6 +7,7 @@ import { ok, fail } from '../utils/response';
 import { sendPushToUser } from '../utils/push';
 import { quoteOrder } from '../utils/orderPricing';
 import { notifyOrderDispatchable, notifyRestaurantNewOrder } from '../utils/orderNotifications';
+import { resolveAddonsForItems } from '../utils/resolveAddons';
 
 const router = Router();
 
@@ -352,6 +353,7 @@ async function getTrackingData(orderId: string, userId: string) {
             ua.latitude AS dest_lat, ua.longitude AS dest_lng,
             r.latitude AS restaurant_lat, r.longitude AS restaurant_lng,
             d.location_lat, d.location_lng, d.rating AS driver_rating, d.vehicle_type,
+            d.vehicle_make, d.vehicle_reg,
             u.first_name AS driver_first_name, u.last_name AS driver_last_name,
             u.phone AS driver_phone, u.avatar_url AS driver_avatar
      FROM orders o
@@ -415,6 +417,8 @@ async function getTrackingData(orderId: string, userId: string) {
       avatar: row.driver_avatar,
       rating: parseFloat(String(row.driver_rating ?? '0')),
       vehicleType: row.vehicle_type,
+      vehicleMake: row.vehicle_make,
+      vehicleReg: row.vehicle_reg,
       latitude: driverLat,
       longitude: driverLng,
       lat: driverLat,
@@ -504,28 +508,67 @@ router.patch('/:id/notes', requireAuth, async (req: AuthRequest, res: Response) 
 // POST /orders/:id/cancel
 router.post('/:id/cancel', requireAuth, async (req: AuthRequest, res: Response) => {
   try {
+    const { reason } = req.body as { reason?: string };
+
+    const existing = await pool.query(
+      `SELECT status, total, restaurant_id, driver_id FROM orders WHERE id=$1 AND user_id=$2`,
+      [req.params.id, req.userId]
+    );
+    if (!existing.rows.length) {
+      fail(res, 404, 'NOT_FOUND', 'Order not found.');
+      return;
+    }
+    const before = existing.rows[0];
+    // 10% cancellation fee once the restaurant has started preparing — free before that.
+    const fee = before.status === 'preparing' ? Math.round(parseFloat(String(before.total)) * 0.10 * 100) / 100 : 0;
+
     const result = await pool.query(
-      `UPDATE orders SET status='cancelled', cancelled_at=NOW()
+      `UPDATE orders
+       SET status='cancelled', cancelled_at=NOW(), cancel_reason=$3, cancellation_fee=$4, cancelled_by='customer'
        WHERE id=$1 AND user_id=$2
        AND status IN ('pending_payment','placed','confirmed','preparing') RETURNING *`,
-      [req.params.id, req.userId]
+      [req.params.id, req.userId, reason ?? null, fee]
     );
     if (!result.rows.length) {
       fail(res, 400, 'CANNOT_CANCEL', 'Order cannot be cancelled at this stage.');
       return;
     }
-    ok(res, mapOrderRow(result.rows[0]));
+    const total = parseFloat(String(before.total));
+    ok(res, { ...mapOrderRow(result.rows[0]), cancellationFee: fee, refundDue: total - fee });
 
     const orderId = req.params.id;
     const title = 'Order Cancelled';
     const body = 'Your order has been cancelled.';
     void sendPushToUser(req.userId!, title, body, { type: 'order_update', orderId });
     void insertNotification(req.userId!, 'order_cancelled', title, body, { orderId });
+
+    // Let the restaurant and (if already assigned) the driver know without them
+    // having to poll — same notify() pattern used elsewhere in orderNotifications.ts.
+    if (before.restaurant_id) {
+      void notifyRestaurantOfCancellation(before.restaurant_id as string, orderId);
+    }
+    if (before.driver_id) {
+      void insertNotification(before.driver_id as string, 'order_cancelled', 'Order Cancelled', 'A delivery you were assigned has been cancelled by the customer.', { orderId });
+      void sendPushToUser(before.driver_id as string, 'Order Cancelled', 'A delivery you were assigned has been cancelled by the customer.', { type: 'order_update', orderId });
+    }
   } catch (err) {
     logger.error({ err }, 'cancel order');
     fail(res, 500, 'SERVER_ERROR', 'Something went wrong.');
   }
 });
+
+async function notifyRestaurantOfCancellation(restaurantId: string, orderId: string): Promise<void> {
+  try {
+    const row = await pool.query('SELECT owner_id FROM restaurants WHERE id=$1', [restaurantId]);
+    const ownerId = row.rows[0]?.owner_id as string | undefined;
+    if (!ownerId) return;
+    const shortId = orderId.slice(-6).toUpperCase();
+    void insertNotification(ownerId, 'order_cancelled', 'Order Cancelled', `Order #${shortId} was cancelled by the customer.`, { orderId });
+    void sendPushToUser(ownerId, 'Order Cancelled', `Order #${shortId} was cancelled by the customer.`, { type: 'order_update', orderId });
+  } catch (err) {
+    logger.error({ err, orderId, restaurantId }, 'notifyRestaurantOfCancellation');
+  }
+}
 
 // POST /orders/:id/rate
 router.post('/:id/rate', requireAuth, async (req: AuthRequest, res: Response) => {
@@ -593,6 +636,7 @@ async function fetchOrderDetail(client: import('pg').PoolClient, orderId: string
   ]);
 
   const o = orderRes.rows[0];
+  const resolvedAddons = await resolveAddonsForItems(itemsRes.rows);
   return {
     ...mapOrderRow(o),
     deliveryAddress: o.addr_street ? {
@@ -610,7 +654,7 @@ async function fetchOrderDetail(client: import('pg').PoolClient, orderId: string
         : undefined,
       formattedAddress: [o.addr_street, o.addr_suburb, o.addr_city, o.addr_province].filter(Boolean).join(', '),
     } : null,
-    items: itemsRes.rows.map((i) => ({
+    items: itemsRes.rows.map((i, idx) => ({
       id: i.id,
       menuItemId: i.menu_item_id,
       menuItemName: i.item_name,
@@ -621,6 +665,7 @@ async function fetchOrderDetail(client: import('pg').PoolClient, orderId: string
       unitPrice: parseFloat(i.unit_price),
       totalPrice: parseFloat(i.unit_price) * i.quantity,
       addonIds: i.addon_ids,
+      addons: resolvedAddons[idx],
       instructions: i.instructions,
     })),
   };
@@ -648,6 +693,9 @@ function mapOrderRow(o: Record<string, unknown>) {
     placedAt: o.placed_at,
     confirmedAt: o.confirmed_at,
     cancelledAt: o.cancelled_at,
+    cancelReason: o.cancel_reason ?? undefined,
+    cancellationFee: o.cancellation_fee != null ? parseFloat(String(o.cancellation_fee)) : 0,
+    cancelledBy: o.cancelled_by ?? undefined,
     restaurant: {
       name: o.restaurant_name,
       logo: o.restaurant_logo,

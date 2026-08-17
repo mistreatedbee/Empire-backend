@@ -10,6 +10,7 @@ async function driverPayoutForFee(deliveryFee: number): Promise<number> {
 import { requireDriver, AuthRequest } from '../middleware/auth';
 import { ok, fail } from '../utils/response';
 import { sendPushToUser } from '../utils/push';
+import { resolveAddonsForItems } from '../utils/resolveAddons';
 
 const router = Router();
 
@@ -180,8 +181,9 @@ router.get('/stats/today', requireDriver, async (req: AuthRequest, res: Response
 router.get('/deliveries/available', requireDriver, async (req: AuthRequest, res: Response) => {
   try {
     const result = await pool.query(
-      `SELECT o.id, o.delivery_fee, o.subtotal,
+      `SELECT o.id, o.delivery_fee, o.subtotal, o.distance_km,
               r.name AS restaurant_name, r.address AS restaurant_address,
+              r.latitude AS restaurant_lat, r.longitude AS restaurant_lng,
               ua.street AS customer_street, ua.suburb AS customer_suburb,
               ua.city AS customer_city,
               u.first_name AS customer_first_name, u.last_name AS customer_last_name,
@@ -212,10 +214,13 @@ router.get('/deliveries/available', requireDriver, async (req: AuthRequest, res:
       orderId: row.id,
       restaurantName: row.restaurant_name,
       restaurantAddress: row.restaurant_address ?? '',
+      restaurantLat: row.restaurant_lat != null ? parseFloat(row.restaurant_lat) : null,
+      restaurantLng: row.restaurant_lng != null ? parseFloat(row.restaurant_lng) : null,
       customerName: `${row.customer_first_name} ${row.customer_last_name}`.trim(),
       customerAddress: addrParts.join(', '),
       customerPhone: row.customer_phone,
       itemCount: Number(row.item_count ?? 0),
+      distanceKm: row.distance_km != null ? parseFloat(row.distance_km) : null,
       payout,
       etaMinutes: 20,
     });
@@ -229,7 +234,7 @@ router.get('/deliveries/available', requireDriver, async (req: AuthRequest, res:
 router.get('/deliveries/active', requireDriver, async (req: AuthRequest, res: Response) => {
   try {
     const result = await pool.query(
-      `SELECT o.id, o.status, o.delivery_fee,
+      `SELECT o.id, o.status, o.delivery_fee, o.subtotal, o.distance_km,
               r.name AS restaurant_name, r.logo AS restaurant_logo,
               r.address AS restaurant_address,
               r.latitude AS restaurant_lat, r.longitude AS restaurant_lng,
@@ -239,7 +244,7 @@ router.get('/deliveries/active', requireDriver, async (req: AuthRequest, res: Re
               u.phone AS customer_phone,
               o.delivery_notes,
               da.payout, da.picked_up_at,
-              (SELECT json_agg(json_build_object('name', mi.name, 'quantity', oi.quantity))
+              (SELECT json_agg(json_build_object('name', mi.name, 'quantity', oi.quantity, 'addonIds', oi.addon_ids))
                FROM order_items oi JOIN menu_items mi ON mi.id=oi.menu_item_id
                WHERE oi.order_id=o.id) AS items
        FROM orders o
@@ -258,6 +263,10 @@ router.get('/deliveries/active', requireDriver, async (req: AuthRequest, res: Re
     }
     const row = result.rows[0];
     const addrParts = [row.dest_street, row.dest_suburb, row.dest_city].filter(Boolean);
+    const items = row.items ?? [];
+    const resolvedAddons = await resolveAddonsForItems(
+      items.map((i: { addonIds: unknown }) => ({ addon_ids: i.addonIds }))
+    );
     ok(res, {
       orderId: row.id,
       status: row.status,
@@ -271,7 +280,13 @@ router.get('/deliveries/active', requireDriver, async (req: AuthRequest, res: Re
       destLat: row.dest_lat != null ? parseFloat(row.dest_lat) : null,
       destLng: row.dest_lng != null ? parseFloat(row.dest_lng) : null,
       deliveryNotes: row.delivery_notes ?? null,
-      items: row.items ?? [],
+      subtotal: row.subtotal != null ? parseFloat(String(row.subtotal)) : null,
+      distanceKm: row.distance_km != null ? parseFloat(String(row.distance_km)) : null,
+      items: items.map((i: Record<string, unknown>, idx: number) => ({
+        name: i.name,
+        quantity: i.quantity,
+        addons: resolvedAddons[idx],
+      })),
       payout: parseFloat(String(row.payout ?? '0')),
       pickedUpAt: row.picked_up_at ?? null,
     });

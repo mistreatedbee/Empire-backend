@@ -378,4 +378,9 @@ ALTER TABLE driver_applications ADD COLUMN IF NOT EXISTS emergency_contact_phone
 ALTER TABLE driver_applications ADD COLUMN IF NOT EXISTS criminal_record_consent BOOLEAN NOT NULL DEFAULT false;
 ALTER TABLE driver_applications ADD COLUMN IF NOT EXISTS vehicle_photo_url VARCHAR(500);
 ALTER TABLE driver_applications ADD COLUMN IF NOT EXISTS license_plate_photo_url VARCHAR(500);
+
+-- Phase 17: order cancellation reason/fee tracking
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS cancel_reason TEXT;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS cancellation_fee NUMERIC(10,2) NOT NULL DEFAULT 0;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS cancelled_by VARCHAR(20);
 `;
