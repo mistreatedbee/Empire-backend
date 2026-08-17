@@ -453,6 +453,48 @@ router.put('/users/:id/reactivate', async (req: AuthRequest, res: Response) => {
   }
 });
 
+// PUT /admin/users/:id/role
+// Body: { role: 'customer' | 'driver' | 'restaurant' | 'admin' }. Lets an
+// admin correct a mis-assigned role (e.g. demote an account that ended up
+// with admin access by mistake) without touching the database directly.
+router.put('/users/:id/role', async (req: AuthRequest, res: Response) => {
+  try {
+    const { role } = req.body as { role?: string };
+    const allowedRoles = ['customer', 'driver', 'restaurant', 'admin'];
+    if (!role || !allowedRoles.includes(role)) {
+      fail(res, 400, 'VALIDATION_ERROR', 'role must be one of customer, driver, restaurant, admin.');
+      return;
+    }
+    if (req.params.id === req.userId) {
+      fail(res, 400, 'VALIDATION_ERROR', 'You cannot change your own role.');
+      return;
+    }
+
+    const result = await pool.query(
+      `UPDATE users SET role=$1 WHERE id=$2 RETURNING id, email, role`,
+      [role, req.params.id]
+    );
+    if (!result.rows.length) {
+      fail(res, 404, 'NOT_FOUND', 'User not found.');
+      return;
+    }
+
+    await pool.query(
+      `INSERT INTO admin_audit_log (admin_id, action, target_type, target_id, notes)
+       VALUES ($1,'change_role','users',$2,$3)`,
+      [req.userId, req.params.id, `Role changed to ${role}`]
+    );
+    // Force re-login on the affected account so the role change takes effect
+    // immediately rather than waiting for their current session to expire.
+    await pool.query('DELETE FROM refresh_tokens WHERE user_id=$1', [req.params.id]);
+
+    ok(res, { id: result.rows[0].id, email: result.rows[0].email, role: result.rows[0].role });
+  } catch (err) {
+    logger.error({ err }, 'PUT /admin/users/:id/role');
+    fail(res, 500, 'SERVER_ERROR', 'Something went wrong.');
+  }
+});
+
 // PUT /admin/users/:id/subscription
 // Body: { expiresAt: ISO date string | null }. Null clears the expiry (unrestricted access).
 router.put('/users/:id/subscription', async (req: AuthRequest, res: Response) => {
