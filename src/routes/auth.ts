@@ -36,14 +36,6 @@ router.post('/sync', async (req: Request, res: Response) => {
     const { user: insforgeUser } = await insforgeRes.json() as { user: { email: string } };
     const email = insforgeUser.email.toLowerCase();
 
-    // Return existing user if already in our DB
-    const existing = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
-    if (existing.rows.length > 0) {
-      ok(res, mapUser(existing.rows[0]));
-      return;
-    }
-
-    // Create new user from registration data
     const { firstName, lastName, phone, role } = req.body as {
       firstName?: string;
       lastName?: string;
@@ -51,6 +43,30 @@ router.post('/sync', async (req: Request, res: Response) => {
       role?: string;
     };
 
+    // Return existing user if already in our DB — but if a stub 'customer'
+    // row was auto-created by requireAuth's own auto-create-on-first-sight
+    // path (which has no role context, e.g. a background request that raced
+    // ahead of this call for the same email) and this call is explicitly
+    // requesting driver/restaurant, upgrade it here rather than silently
+    // returning the wrong role. Only ever moves customer -> driver/restaurant,
+    // never touches an already-established driver/restaurant/admin account.
+    const existing = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
+    if (existing.rows.length > 0) {
+      const row = existing.rows[0];
+      if ((role === 'driver' || role === 'restaurant') && row.role === 'customer') {
+        const upgraded = await pool.query(
+          `UPDATE users SET role = $1, approval_status = 'pending', updated_at = NOW()
+           WHERE id = $2 RETURNING *`,
+          [role, row.id]
+        );
+        ok(res, mapUser(upgraded.rows[0]));
+        return;
+      }
+      ok(res, mapUser(row));
+      return;
+    }
+
+    // Create new user from registration data
     const allowedRoles = ['customer', 'driver', 'restaurant'];
     const userRole = allowedRoles.includes(role ?? '') ? role! : 'customer';
     const approvalStatus = userRole === 'customer' ? 'approved' : 'pending';
