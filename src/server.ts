@@ -467,4 +467,66 @@ ALTER TABLE driver_assignments ADD COLUMN IF NOT EXISTS picked_up_at TIMESTAMPTZ
 ALTER TABLE driver_assignments ADD COLUMN IF NOT EXISTS delivered_at TIMESTAMPTZ;
 ALTER TABLE driver_assignments ADD COLUMN IF NOT EXISTS delivery_photo TEXT;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_driver_assignments_driver_order ON driver_assignments(driver_id, order_id);
+
+-- Phase 21: driver reviews + order tips
+CREATE TABLE IF NOT EXISTS driver_reviews (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES users(id),
+  driver_id UUID NOT NULL REFERENCES users(id),
+  order_id UUID NOT NULL UNIQUE REFERENCES orders(id),
+  rating SMALLINT NOT NULL CHECK (rating >= 1 AND rating <= 5),
+  review TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS tip_amount NUMERIC(10,2) NOT NULL DEFAULT 0;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS tip_paid_at TIMESTAMPTZ;
+
+CREATE INDEX IF NOT EXISTS idx_driver_reviews_driver_id ON driver_reviews(driver_id);
+
+-- Phase 22: wallets, withdrawals, user balances
+ALTER TABLE users ADD COLUMN IF NOT EXISTS wallet_balance NUMERIC(10,2) NOT NULL DEFAULT 0;
+
+CREATE TABLE IF NOT EXISTS wallet_transactions (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  type VARCHAR(30) NOT NULL,
+  amount NUMERIC(10,2) NOT NULL,
+  reference VARCHAR(100),
+  description TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS withdrawal_requests (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  driver_id UUID REFERENCES users(id) ON DELETE CASCADE,
+  restaurant_id UUID REFERENCES restaurants(id) ON DELETE CASCADE,
+  entity_type VARCHAR(20) NOT NULL DEFAULT 'driver',
+  amount NUMERIC(10,2) NOT NULL,
+  status VARCHAR(20) NOT NULL DEFAULT 'pending',
+  bank_name VARCHAR(100),
+  bank_account_no VARCHAR(50),
+  bank_account_type VARCHAR(50),
+  bank_holder_name VARCHAR(200),
+  admin_notes TEXT,
+  processed_at TIMESTAMPTZ,
+  processed_by UUID REFERENCES users(id),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+ALTER TABLE withdrawal_requests ADD COLUMN IF NOT EXISTS entity_type VARCHAR(20) NOT NULL DEFAULT 'driver';
+ALTER TABLE withdrawal_requests ADD COLUMN IF NOT EXISTS restaurant_id UUID REFERENCES restaurants(id) ON DELETE CASCADE;
+ALTER TABLE withdrawal_requests ADD COLUMN IF NOT EXISTS bank_name VARCHAR(100);
+ALTER TABLE withdrawal_requests ADD COLUMN IF NOT EXISTS bank_account_no VARCHAR(50);
+ALTER TABLE withdrawal_requests ADD COLUMN IF NOT EXISTS bank_account_type VARCHAR(50);
+ALTER TABLE withdrawal_requests ADD COLUMN IF NOT EXISTS bank_holder_name VARCHAR(200);
+ALTER TABLE withdrawal_requests ADD COLUMN IF NOT EXISTS admin_notes TEXT;
+ALTER TABLE withdrawal_requests ADD COLUMN IF NOT EXISTS processed_at TIMESTAMPTZ;
+ALTER TABLE withdrawal_requests ADD COLUMN IF NOT EXISTS processed_by UUID REFERENCES users(id);
+ALTER TABLE withdrawal_requests ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+
+ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS wallet_balance NUMERIC(10,2) NOT NULL DEFAULT 0;
+
+CREATE INDEX IF NOT EXISTS idx_withdrawal_requests_status ON withdrawal_requests(status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_wallet_transactions_user_id ON wallet_transactions(user_id, created_at DESC);
 `;

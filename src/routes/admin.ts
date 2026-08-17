@@ -36,6 +36,9 @@ router.get('/stats', async (_req: AuthRequest, res: Response) => {
 
     const u = users.rows[0];
     const o = orders.rows[0];
+    const pendingWithdrawals = await pool.query(
+      `SELECT COUNT(*) AS cnt FROM withdrawal_requests WHERE status='pending'`,
+    );
     ok(res, {
       users: {
         total: Number(u.total),
@@ -50,6 +53,7 @@ router.get('/stats', async (_req: AuthRequest, res: Response) => {
       },
       pendingDriverApplications: Number(pendingDrivers.rows[0].cnt),
       pendingRestaurantApplications: Number(pendingRestaurants.rows[0].cnt),
+      pendingWithdrawals: Number(pendingWithdrawals.rows[0]?.cnt ?? 0),
     });
   } catch (err) {
     logger.error({ err }, 'GET /admin/stats');
@@ -519,6 +523,341 @@ router.put('/users/:id/subscription', async (req: AuthRequest, res: Response) =>
     ok(res, { subscriptionExpiresAt: expiresAt ?? null });
   } catch (err) {
     logger.error({ err }, 'PUT /admin/users/:id/subscription');
+    fail(res, 500, 'SERVER_ERROR', 'Something went wrong.');
+  }
+});
+
+// ─── Financial overview ───────────────────────────────────────────────────────
+
+function mapWithdrawalRow(row: Record<string, unknown>) {
+  return {
+    id: row.id,
+    entityType: row.entity_type ?? 'driver',
+    driverId: row.driver_id ?? null,
+    restaurantId: row.restaurant_id ?? null,
+    amount: parseFloat(String(row.amount)),
+    status: row.status,
+    bankName: row.bank_name ?? null,
+    bankAccountNo: row.bank_account_no ?? null,
+    bankAccountType: row.bank_account_type ?? null,
+    bankHolderName: row.bank_holder_name ?? null,
+    adminNotes: row.admin_notes ?? null,
+    processedAt: row.processed_at ?? null,
+    createdAt: row.created_at,
+    requesterName: row.requester_name ?? null,
+    requesterEmail: row.requester_email ?? null,
+    requesterPhone: row.requester_phone ?? null,
+    businessName: row.business_name ?? null,
+  };
+}
+
+// GET /admin/withdrawals?status=pending|approved|rejected|all&entityType=driver|restaurant|all
+router.get('/withdrawals', async (req: AuthRequest, res: Response) => {
+  try {
+    const status = (req.query.status as string) || 'pending';
+    const entityType = (req.query.entityType as string) || 'all';
+    const params: unknown[] = [];
+    let where = 'WHERE 1=1';
+    if (status !== 'all') {
+      params.push(status);
+      where += ` AND wr.status = $${params.length}`;
+    }
+    if (entityType !== 'all') {
+      params.push(entityType);
+      where += ` AND wr.entity_type = $${params.length}`;
+    }
+    const result = await pool.query(
+      `SELECT wr.*,
+              COALESCE(du.first_name || ' ' || du.last_name, ru.first_name || ' ' || ru.last_name) AS requester_name,
+              COALESCE(du.email, ru.email) AS requester_email,
+              COALESCE(du.phone, ru.phone) AS requester_phone,
+              res.name AS business_name
+       FROM withdrawal_requests wr
+       LEFT JOIN users du ON du.id = wr.driver_id
+       LEFT JOIN restaurants res ON res.id = wr.restaurant_id
+       LEFT JOIN users ru ON ru.id = res.owner_id
+       ${where}
+       ORDER BY wr.created_at DESC
+       LIMIT 100`,
+      params,
+    );
+    ok(res, result.rows.map(mapWithdrawalRow));
+  } catch (err) {
+    logger.error({ err }, 'GET /admin/withdrawals');
+    fail(res, 500, 'SERVER_ERROR', 'Something went wrong.');
+  }
+});
+
+// PUT /admin/withdrawals/:id/approve
+router.put('/withdrawals/:id/approve', async (req: AuthRequest, res: Response) => {
+  try {
+    const { notes } = req.body as { notes?: string };
+    const result = await pool.query(
+      `UPDATE withdrawal_requests
+       SET status='approved', admin_notes=$2, processed_at=NOW(), processed_by=$3
+       WHERE id=$1 AND status='pending'
+       RETURNING *`,
+      [req.params.id, notes ?? null, req.userId],
+    );
+    if (!result.rows.length) {
+      fail(res, 404, 'NOT_FOUND', 'Pending withdrawal not found.');
+      return;
+    }
+    const row = result.rows[0];
+    await pool.query(
+      `INSERT INTO admin_audit_log (admin_id, action, target_type, target_id, notes)
+       VALUES ($1,'approve_withdrawal','withdrawal_requests',$2,$3)`,
+      [req.userId, req.params.id, notes ?? 'Approved payout'],
+    );
+    const notifyUserId = row.driver_id ?? (
+      await pool.query('SELECT owner_id FROM restaurants WHERE id=$1', [row.restaurant_id])
+    ).rows[0]?.owner_id;
+    if (notifyUserId) {
+      void notify(
+        notifyUserId as string,
+        'payout',
+        'Withdrawal Approved',
+        `Your withdrawal of R${parseFloat(String(row.amount)).toFixed(2)} has been approved and will be paid out shortly.`,
+        { type: 'payout' },
+      );
+    }
+    ok(res, mapWithdrawalRow(result.rows[0]));
+  } catch (err) {
+    logger.error({ err }, 'PUT /admin/withdrawals/:id/approve');
+    fail(res, 500, 'SERVER_ERROR', 'Something went wrong.');
+  }
+});
+
+// PUT /admin/withdrawals/:id/reject — refunds balance
+router.put('/withdrawals/:id/reject', async (req: AuthRequest, res: Response) => {
+  try {
+    const { reason } = req.body as { reason?: string };
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const wrRes = await client.query(
+        `SELECT * FROM withdrawal_requests WHERE id=$1 AND status='pending' FOR UPDATE`,
+        [req.params.id],
+      );
+      if (!wrRes.rows.length) {
+        await client.query('ROLLBACK');
+        fail(res, 404, 'NOT_FOUND', 'Pending withdrawal not found.');
+        return;
+      }
+      const wr = wrRes.rows[0];
+      const amount = parseFloat(String(wr.amount));
+
+      if (wr.entity_type === 'restaurant' && wr.restaurant_id) {
+        await client.query(
+          `UPDATE restaurants SET wallet_balance = wallet_balance + $1 WHERE id = $2`,
+          [amount, wr.restaurant_id],
+        );
+      } else if (wr.driver_id) {
+        await client.query(
+          `UPDATE drivers SET wallet_balance = wallet_balance + $1 WHERE id = $2`,
+          [amount, wr.driver_id],
+        );
+        await client.query(
+          `INSERT INTO driver_transactions (driver_id, type, amount, description)
+           VALUES ($1,'withdrawal_refund',$2,'Withdrawal rejected — funds returned')`,
+          [wr.driver_id, amount],
+        );
+      }
+
+      const updated = await client.query(
+        `UPDATE withdrawal_requests
+         SET status='rejected', admin_notes=$2, processed_at=NOW(), processed_by=$3
+         WHERE id=$1 RETURNING *`,
+        [req.params.id, reason ?? null, req.userId],
+      );
+      await client.query(
+        `INSERT INTO admin_audit_log (admin_id, action, target_type, target_id, notes)
+         VALUES ($1,'reject_withdrawal','withdrawal_requests',$2,$3)`,
+        [req.userId, req.params.id, reason ?? 'Rejected'],
+      );
+      await client.query('COMMIT');
+
+      const notifyUserId = wr.driver_id ?? (
+        await pool.query('SELECT owner_id FROM restaurants WHERE id=$1', [wr.restaurant_id])
+      ).rows[0]?.owner_id;
+      if (notifyUserId) {
+        void notify(
+          notifyUserId as string,
+          'payout',
+          'Withdrawal Declined',
+          reason ?? 'Your withdrawal request could not be processed. Funds were returned to your wallet.',
+          { type: 'payout' },
+        );
+      }
+      ok(res, mapWithdrawalRow(updated.rows[0]));
+    } catch (innerErr) {
+      await client.query('ROLLBACK');
+      throw innerErr;
+    } finally {
+      client.release();
+    }
+  } catch (err) {
+    logger.error({ err }, 'PUT /admin/withdrawals/:id/reject');
+    fail(res, 500, 'SERVER_ERROR', 'Something went wrong.');
+  }
+});
+
+// GET /admin/drivers — earnings & trip overview
+router.get('/drivers', async (_req: AuthRequest, res: Response) => {
+  try {
+    const result = await pool.query(
+      `SELECT u.id, u.first_name, u.last_name, u.email, u.phone, u.approval_status,
+              d.wallet_balance, d.rating, d.total_trips, d.is_online,
+              d.bank_name, d.bank_account_no, d.bank_holder_name,
+              COALESCE(today.trips_today, 0) AS trips_today,
+              COALESCE(today.earnings_today, 0) AS earnings_today,
+              COALESCE(all_time.earnings_total, 0) AS earnings_total,
+              pending.amount AS pending_withdrawal,
+              pending.id AS pending_withdrawal_id
+       FROM users u
+       JOIN drivers d ON d.id = u.id
+       LEFT JOIN LATERAL (
+         SELECT COUNT(*) AS trips_today,
+                COALESCE(SUM(da.payout), 0) AS earnings_today
+         FROM driver_assignments da
+         JOIN orders o ON o.id = da.order_id
+         WHERE da.driver_id = u.id AND o.status = 'delivered'
+           AND o.delivered_at >= CURRENT_DATE
+       ) today ON true
+       LEFT JOIN LATERAL (
+         SELECT COALESCE(SUM(amount), 0) AS earnings_total
+         FROM driver_transactions
+         WHERE driver_id = u.id AND type IN ('earning', 'tip')
+       ) all_time ON true
+       LEFT JOIN LATERAL (
+         SELECT wr.id, wr.amount
+         FROM withdrawal_requests wr
+         WHERE wr.driver_id = u.id AND wr.status = 'pending'
+         ORDER BY wr.created_at DESC
+         LIMIT 1
+       ) pending ON true
+       WHERE u.role = 'driver'
+       ORDER BY earnings_today DESC, u.first_name ASC`,
+    );
+    ok(res, result.rows.map((r) => ({
+      id: r.id,
+      firstName: r.first_name,
+      lastName: r.last_name,
+      email: r.email,
+      phone: r.phone,
+      approvalStatus: r.approval_status,
+      walletBalance: parseFloat(String(r.wallet_balance ?? '0')),
+      rating: parseFloat(String(r.rating ?? '5')),
+      totalTrips: Number(r.total_trips ?? 0),
+      isOnline: Boolean(r.is_online),
+      tripsToday: Number(r.trips_today ?? 0),
+      earningsToday: parseFloat(String(r.earnings_today ?? '0')),
+      earningsTotal: parseFloat(String(r.earnings_total ?? '0')),
+      pendingWithdrawal: r.pending_withdrawal != null ? parseFloat(String(r.pending_withdrawal)) : null,
+      pendingWithdrawalId: r.pending_withdrawal_id ?? null,
+      bankName: r.bank_name ?? null,
+      bankAccountNo: r.bank_account_no ?? null,
+      bankHolderName: r.bank_holder_name ?? null,
+    })));
+  } catch (err) {
+    logger.error({ err }, 'GET /admin/drivers');
+    fail(res, 500, 'SERVER_ERROR', 'Something went wrong.');
+  }
+});
+
+// GET /admin/restaurants
+router.get('/restaurants', async (_req: AuthRequest, res: Response) => {
+  try {
+    const result = await pool.query(
+      `SELECT r.id, r.name, r.address, r.is_active, r.wallet_balance,
+              u.id AS owner_id, u.first_name, u.last_name, u.email, u.phone, u.approval_status,
+              COALESCE(stats.orders_today, 0) AS orders_today,
+              COALESCE(stats.revenue_today, 0) AS revenue_today,
+              COALESCE(stats.orders_total, 0) AS orders_total,
+              pending.amount AS pending_withdrawal,
+              pending.id AS pending_withdrawal_id,
+              ra.bank_name, ra.bank_account_no, ra.bank_holder
+       FROM restaurants r
+       JOIN users u ON u.id = r.owner_id
+       LEFT JOIN restaurant_applications ra ON ra.user_id = u.id AND ra.status = 'approved'
+       LEFT JOIN LATERAL (
+         SELECT COUNT(*) FILTER (WHERE o.placed_at >= CURRENT_DATE) AS orders_today,
+                COALESCE(SUM(o.subtotal) FILTER (WHERE o.placed_at >= CURRENT_DATE AND o.status != 'cancelled'), 0) AS revenue_today,
+                COUNT(*) AS orders_total
+         FROM orders o WHERE o.restaurant_id = r.id AND o.status != 'cancelled'
+       ) stats ON true
+       LEFT JOIN LATERAL (
+         SELECT wr.id, wr.amount
+         FROM withdrawal_requests wr
+         WHERE wr.restaurant_id = r.id AND wr.status = 'pending'
+         ORDER BY wr.created_at DESC LIMIT 1
+       ) pending ON true
+       ORDER BY revenue_today DESC, r.name ASC`,
+    );
+    ok(res, result.rows.map((r) => ({
+      id: r.id,
+      name: r.name,
+      address: r.address,
+      isActive: Boolean(r.is_active),
+      walletBalance: parseFloat(String(r.wallet_balance ?? '0')),
+      ownerId: r.owner_id,
+      ownerName: `${r.first_name} ${r.last_name}`.trim(),
+      ownerEmail: r.email,
+      ownerPhone: r.phone,
+      approvalStatus: r.approval_status,
+      ordersToday: Number(r.orders_today ?? 0),
+      revenueToday: parseFloat(String(r.revenue_today ?? '0')),
+      ordersTotal: Number(r.orders_total ?? 0),
+      pendingWithdrawal: r.pending_withdrawal != null ? parseFloat(String(r.pending_withdrawal)) : null,
+      pendingWithdrawalId: r.pending_withdrawal_id ?? null,
+      bankName: r.bank_name ?? null,
+      bankAccountNo: r.bank_account_no ?? null,
+      bankHolderName: r.bank_holder ?? null,
+    })));
+  } catch (err) {
+    logger.error({ err }, 'GET /admin/restaurants');
+    fail(res, 500, 'SERVER_ERROR', 'Something went wrong.');
+  }
+});
+
+// GET /admin/customers
+router.get('/customers', async (req: AuthRequest, res: Response) => {
+  try {
+    const search = (req.query.search as string) ?? '';
+    const result = await pool.query(
+      `SELECT u.id, u.first_name, u.last_name, u.email, u.phone, u.approval_status,
+              u.wallet_balance, u.created_at,
+              COALESCE(o.orders_total, 0) AS orders_total,
+              COALESCE(o.spent_total, 0) AS spent_total,
+              COALESCE(o.orders_today, 0) AS orders_today
+       FROM users u
+       LEFT JOIN LATERAL (
+         SELECT COUNT(*) AS orders_total,
+                COALESCE(SUM(total) FILTER (WHERE status != 'cancelled'), 0) AS spent_total,
+                COUNT(*) FILTER (WHERE placed_at >= CURRENT_DATE) AS orders_today
+         FROM orders WHERE user_id = u.id
+       ) o ON true
+       WHERE u.role = 'customer'
+         AND ($1 = '' OR u.first_name ILIKE $2 OR u.last_name ILIKE $2 OR u.email ILIKE $2)
+       ORDER BY o.spent_total DESC NULLS LAST, u.created_at DESC
+       LIMIT 100`,
+      [search, `%${search}%`],
+    );
+    ok(res, result.rows.map((r) => ({
+      id: r.id,
+      firstName: r.first_name,
+      lastName: r.last_name,
+      email: r.email,
+      phone: r.phone,
+      approvalStatus: r.approval_status,
+      walletBalance: parseFloat(String(r.wallet_balance ?? '0')),
+      ordersTotal: Number(r.orders_total ?? 0),
+      ordersToday: Number(r.orders_today ?? 0),
+      spentTotal: parseFloat(String(r.spent_total ?? '0')),
+      createdAt: r.created_at,
+    })));
+  } catch (err) {
+    logger.error({ err }, 'GET /admin/customers');
     fail(res, 500, 'SERVER_ERROR', 'Something went wrong.');
   }
 });

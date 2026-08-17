@@ -274,6 +274,8 @@ router.get('/', requireAuth, async (req: AuthRequest, res: Response) => {
     let sql = `
       SELECT o.*, r.name AS restaurant_name, r.logo AS restaurant_logo,
              r.cover_image AS restaurant_cover,
+             rr.rating AS restaurant_rating, rr.review AS restaurant_review,
+             dr.rating AS driver_review_rating, dr.review AS driver_review_text,
              (SELECT json_agg(json_build_object(
                 'id', oi.id, 'menuItemId', oi.menu_item_id, 'menuItemName', mi.name,
                 'menuItemImage', mi.image, 'quantity', oi.quantity, 'unitPrice', oi.unit_price,
@@ -283,6 +285,8 @@ router.get('/', requireAuth, async (req: AuthRequest, res: Response) => {
               WHERE oi.order_id = o.id) AS items
       FROM orders o
       JOIN restaurants r ON r.id = o.restaurant_id
+      LEFT JOIN restaurant_reviews rr ON rr.order_id = o.id AND rr.user_id = o.user_id
+      LEFT JOIN driver_reviews dr ON dr.order_id = o.id AND dr.user_id = o.user_id
       WHERE o.user_id = $1
     `;
     const params: unknown[] = [req.userId];
@@ -601,22 +605,37 @@ async function notifyRestaurantOfCancellation(restaurantId: string, orderId: str
 // POST /orders/:id/rate
 router.post('/:id/rate', requireAuth, async (req: AuthRequest, res: Response) => {
   try {
-    const { rating, review } = req.body;
+    const { rating, review, driverRating, driverReview, tipAmount } = req.body;
     if (!rating || rating < 1 || rating > 5) {
       fail(res, 400, 'VALIDATION_ERROR', 'rating must be between 1 and 5.');
       return;
     }
+    if (driverRating != null && (driverRating < 1 || driverRating > 5)) {
+      fail(res, 400, 'VALIDATION_ERROR', 'driverRating must be between 1 and 5.');
+      return;
+    }
+    const tip = tipAmount != null ? parseFloat(String(tipAmount)) : 0;
+    if (tip < 0 || !Number.isFinite(tip)) {
+      fail(res, 400, 'VALIDATION_ERROR', 'tipAmount must be a non-negative number.');
+      return;
+    }
+
     const client = await pool.connect();
     try {
+      await client.query('BEGIN');
       const orderRow = await client.query(
-        'SELECT id, restaurant_id FROM orders WHERE id=$1 AND user_id=$2 AND status=$3',
+        `SELECT id, restaurant_id, driver_id, payment_method, tip_amount
+         FROM orders WHERE id=$1 AND user_id=$2 AND status=$3 FOR UPDATE`,
         [req.params.id, req.userId, 'delivered']
       );
       if (!orderRow.rows.length) {
+        await client.query('ROLLBACK');
         fail(res, 404, 'NOT_FOUND', 'Delivered order not found.');
         return;
       }
-      const restaurantId = orderRow.rows[0].restaurant_id as string;
+      const order = orderRow.rows[0];
+      const restaurantId = order.restaurant_id as string;
+      const driverId = order.driver_id as string | null;
 
       await client.query(`
         INSERT INTO restaurant_reviews (user_id, restaurant_id, order_id, rating, review)
@@ -624,7 +643,6 @@ router.post('/:id/rate', requireAuth, async (req: AuthRequest, res: Response) =>
         ON CONFLICT (order_id) DO UPDATE SET rating=$4, review=$5
       `, [req.userId, restaurantId, req.params.id, rating, review ?? null]);
 
-      // Recalculate restaurant average rating
       await client.query(`
         UPDATE restaurants
         SET rating = (SELECT ROUND(AVG(rating)::NUMERIC, 2) FROM restaurant_reviews WHERE restaurant_id=$1),
@@ -632,7 +650,78 @@ router.post('/:id/rate', requireAuth, async (req: AuthRequest, res: Response) =>
         WHERE id=$1
       `, [restaurantId]);
 
-      ok(res, null);
+      if (driverId && driverRating) {
+        await client.query(`
+          INSERT INTO driver_reviews (user_id, driver_id, order_id, rating, review)
+          VALUES ($1,$2,$3,$4,$5)
+          ON CONFLICT (order_id) DO UPDATE SET rating=$4, review=$5
+        `, [req.userId, driverId, req.params.id, driverRating, driverReview ?? null]);
+
+        await client.query(`
+          UPDATE drivers
+          SET rating = (SELECT ROUND(AVG(rating)::NUMERIC, 2) FROM driver_reviews WHERE driver_id=$1),
+              review_count = (SELECT COUNT(*) FROM driver_reviews WHERE driver_id=$1)
+          WHERE id=$1
+        `, [driverId]);
+      }
+
+      if (tip > 0) {
+        if (String(order.payment_method) === 'cash') {
+          await client.query('ROLLBACK');
+          fail(res, 400, 'VALIDATION_ERROR', 'Tips are not available for cash on delivery orders.');
+          return;
+        }
+        if (!driverId) {
+          await client.query('ROLLBACK');
+          fail(res, 400, 'VALIDATION_ERROR', 'No driver assigned to tip.');
+          return;
+        }
+        const existingTip = parseFloat(String(order.tip_amount ?? '0'));
+        if (existingTip > 0) {
+          await client.query('ROLLBACK');
+          fail(res, 409, 'CONFLICT', 'A tip has already been added to this order.');
+          return;
+        }
+        const userRes = await client.query(
+          'SELECT wallet_balance FROM users WHERE id=$1 FOR UPDATE',
+          [req.userId],
+        );
+        const balance = parseFloat(String(userRes.rows[0]?.wallet_balance ?? '0'));
+        if (balance < tip) {
+          await client.query('ROLLBACK');
+          fail(res, 400, 'INSUFFICIENT_FUNDS', 'Insufficient wallet balance for this tip. Top up your wallet first.');
+          return;
+        }
+        await client.query(
+          'UPDATE users SET wallet_balance = wallet_balance - $1 WHERE id = $2',
+          [tip, req.userId],
+        );
+        await client.query(
+          'UPDATE drivers SET wallet_balance = wallet_balance + $1 WHERE id = $2',
+          [tip, driverId],
+        );
+        await client.query(
+          `INSERT INTO wallet_transactions (user_id, type, amount, reference, description)
+           VALUES ($1, 'tip', $2, $3, $4)`,
+          [req.userId, tip, req.params.id, 'Driver tip'],
+        );
+        await client.query(
+          `INSERT INTO driver_transactions (driver_id, type, amount, description, order_id)
+           VALUES ($1, 'tip', $2, 'Customer tip', $3)`,
+          [driverId, tip, req.params.id],
+        );
+        await client.query(
+          'UPDATE orders SET tip_amount = $1, tip_paid_at = NOW() WHERE id = $2',
+          [tip, req.params.id],
+        );
+      }
+
+      await client.query('COMMIT');
+      const updated = await fetchOrderDetail(client, req.params.id);
+      ok(res, updated);
+    } catch (innerErr) {
+      await client.query('ROLLBACK');
+      throw innerErr;
     } finally {
       client.release();
     }
@@ -646,12 +735,16 @@ async function fetchOrderDetail(client: import('pg').PoolClient, orderId: string
   const [orderRes, itemsRes] = await Promise.all([
     client.query(`
       SELECT o.*, r.name AS restaurant_name, r.logo AS restaurant_logo, r.cover_image AS restaurant_cover,
+             rr.rating AS restaurant_rating, rr.review AS restaurant_review,
+             dr.rating AS driver_review_rating, dr.review AS driver_review_text,
              ua.label AS addr_label, ua.street AS addr_street, ua.suburb AS addr_suburb,
              ua.city AS addr_city, ua.province AS addr_province,
              ua.latitude AS addr_latitude, ua.longitude AS addr_longitude,
              ua.postal_code AS addr_postal_code
       FROM orders o
       JOIN restaurants r ON r.id = o.restaurant_id
+      LEFT JOIN restaurant_reviews rr ON rr.order_id = o.id AND rr.user_id = o.user_id
+      LEFT JOIN driver_reviews dr ON dr.order_id = o.id AND dr.user_id = o.user_id
       LEFT JOIN user_addresses ua ON ua.id = o.delivery_address_id
       WHERE o.id = $1
     `, [orderId]),
@@ -706,6 +799,7 @@ function mapOrderRow(o: Record<string, unknown>) {
     restaurantId: o.restaurant_id,
     restaurantName: o.restaurant_name,
     restaurantLogo: o.restaurant_logo,
+    driverId: o.driver_id ?? undefined,
     subtotal: parseFloat(o.subtotal as string),
     deliveryFee: parseFloat(o.delivery_fee as string),
     serviceFee: parseFloat(o.service_fee as string),
@@ -715,6 +809,7 @@ function mapOrderRow(o: Record<string, unknown>) {
     paymentStatus: o.payment_status,
     couponCode: o.coupon_code,
     deliveryNotes: o.delivery_notes,
+    tipAmount: o.tip_amount != null ? parseFloat(String(o.tip_amount)) : 0,
     estimatedDeliveryTime: o.estimated_delivery_minutes != null
       ? parseInt(String(o.estimated_delivery_minutes), 10)
       : undefined,
@@ -724,6 +819,10 @@ function mapOrderRow(o: Record<string, unknown>) {
     cancelReason: o.cancel_reason ?? undefined,
     cancellationFee: o.cancellation_fee != null ? parseFloat(String(o.cancellation_fee)) : 0,
     cancelledBy: o.cancelled_by ?? undefined,
+    rating: o.restaurant_rating != null ? Number(o.restaurant_rating) : undefined,
+    review: o.restaurant_review != null ? String(o.restaurant_review) : undefined,
+    driverRating: o.driver_review_rating != null ? Number(o.driver_review_rating) : undefined,
+    driverReview: o.driver_review_text != null ? String(o.driver_review_text) : undefined,
     restaurant: {
       name: o.restaurant_name,
       logo: o.restaurant_logo,

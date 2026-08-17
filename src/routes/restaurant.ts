@@ -767,4 +767,108 @@ router.get('/analytics', requireRestaurant, async (req: AuthRequest, res: Respon
   }
 });
 
+// GET /restaurant/wallet
+router.get('/wallet', requireRestaurant, async (req: AuthRequest, res: Response) => {
+  try {
+    const restaurantId = await getMyRestaurant(req.userId!);
+    if (!restaurantId) {
+      fail(res, 404, 'NOT_FOUND', 'No restaurant linked to this account.');
+      return;
+    }
+    const [balRes, bankRes, pendingRes] = await Promise.all([
+      pool.query('SELECT wallet_balance FROM restaurants WHERE id=$1', [restaurantId]),
+      pool.query(
+        `SELECT bank_name, bank_account_no, bank_holder, bank_account_type
+         FROM restaurant_applications WHERE user_id=$1 AND status='approved' ORDER BY reviewed_at DESC LIMIT 1`,
+        [req.userId],
+      ),
+      pool.query(
+        `SELECT id, amount, status, created_at FROM withdrawal_requests
+         WHERE restaurant_id=$1 ORDER BY created_at DESC LIMIT 5`,
+        [restaurantId],
+      ),
+    ]);
+    const bank = bankRes.rows[0];
+    ok(res, {
+      balance: parseFloat(String(balRes.rows[0]?.wallet_balance ?? '0')),
+      bankAccount: bank ? {
+        bankName: bank.bank_name,
+        accountNo: bank.bank_account_no,
+        holderName: bank.bank_holder,
+        accountType: bank.bank_account_type,
+      } : null,
+      recentWithdrawals: pendingRes.rows.map((r) => ({
+        id: r.id,
+        amount: parseFloat(String(r.amount)),
+        status: r.status,
+        createdAt: r.created_at,
+      })),
+    });
+  } catch (err) {
+    logger.error({ err }, 'GET /restaurant/wallet');
+    fail(res, 500, 'SERVER_ERROR', 'Something went wrong.');
+  }
+});
+
+// POST /restaurant/wallet/withdraw
+router.post('/wallet/withdraw', requireRestaurant, async (req: AuthRequest, res: Response) => {
+  try {
+    const { amount } = req.body as { amount?: number };
+    if (!amount || amount <= 0) {
+      fail(res, 400, 'VALIDATION_ERROR', 'amount must be a positive number.');
+      return;
+    }
+    const restaurantId = await getMyRestaurant(req.userId!);
+    if (!restaurantId) {
+      fail(res, 404, 'NOT_FOUND', 'No restaurant linked to this account.');
+      return;
+    }
+    const [restRes, bankRes] = await Promise.all([
+      pool.query('SELECT wallet_balance FROM restaurants WHERE id=$1', [restaurantId]),
+      pool.query(
+        `SELECT bank_name, bank_account_no, bank_holder, bank_account_type
+         FROM restaurant_applications WHERE user_id=$1 AND status='approved' ORDER BY reviewed_at DESC LIMIT 1`,
+        [req.userId],
+      ),
+    ]);
+    const balance = parseFloat(String(restRes.rows[0]?.wallet_balance ?? '0'));
+    if (amount > balance) {
+      fail(res, 400, 'INSUFFICIENT_FUNDS', `Insufficient balance. Available: R${balance.toFixed(2)}.`);
+      return;
+    }
+    const bank = bankRes.rows[0];
+    if (!bank?.bank_account_no) {
+      fail(res, 400, 'VALIDATION_ERROR', 'Add bank details in your application before requesting a withdrawal.');
+      return;
+    }
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(
+        'UPDATE restaurants SET wallet_balance = wallet_balance - $1 WHERE id = $2',
+        [amount, restaurantId],
+      );
+      await client.query(
+        `INSERT INTO withdrawal_requests (restaurant_id, entity_type, amount, status, bank_name, bank_account_no, bank_account_type, bank_holder_name)
+         VALUES ($1,'restaurant',$2,'pending',$3,$4,$5,$6)`,
+        [restaurantId, amount, bank.bank_name, bank.bank_account_no, bank.bank_account_type, bank.bank_holder],
+      );
+      await client.query('COMMIT');
+    } catch (e) {
+      await client.query('ROLLBACK');
+      throw e;
+    } finally {
+      client.release();
+    }
+    ok(res, {
+      success: true,
+      newBalance: balance - amount,
+      message: 'Withdrawal requested. Funds will be processed within 2–3 business days.',
+    });
+  } catch (err) {
+    logger.error({ err }, 'POST /restaurant/wallet/withdraw');
+    fail(res, 500, 'SERVER_ERROR', 'Something went wrong.');
+  }
+});
+
 export default router;

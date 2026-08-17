@@ -2,6 +2,7 @@ import { logger } from '../utils/logger';
 import { Router, Response } from 'express';
 import { pool } from '../db';
 import { loadPricingRules } from '../utils/pricing';
+import { distanceKmBetween, parseCoord } from '../utils/distance';
 
 async function driverPayoutForFee(deliveryFee: number): Promise<number> {
   const rules = await loadPricingRules(pool);
@@ -177,8 +178,33 @@ router.get('/stats/today', requireDriver, async (req: AuthRequest, res: Response
 
 // ─── Delivery dispatch ────────────────────────────────────────────────────────
 
-function mapAvailableDeliveryRow(row: Record<string, unknown>, payout: number) {
+function classifyDeal(payoutPerKm: number | null): 'great' | 'good' | 'fair' | 'low' | null {
+  if (payoutPerKm == null || payoutPerKm <= 0) return null;
+  if (payoutPerKm >= 8) return 'great';
+  if (payoutPerKm >= 5) return 'good';
+  if (payoutPerKm >= 3) return 'fair';
+  return 'low';
+}
+
+function mapAvailableDeliveryRow(
+  row: Record<string, unknown>,
+  payout: number,
+  driverLat?: number | null,
+  driverLng?: number | null,
+) {
   const addrParts = [row.customer_street, row.customer_suburb, row.customer_city].filter(Boolean);
+  const pickupKm = distanceKmBetween(driverLat, driverLng, row.restaurant_lat, row.restaurant_lng);
+  const deliveryKm = row.distance_km != null
+    ? parseFloat(String(row.distance_km))
+    : distanceKmBetween(row.restaurant_lat, row.restaurant_lng, row.customer_lat, row.customer_lng);
+  const totalKm = pickupKm != null && deliveryKm != null
+    ? Math.round((pickupKm + deliveryKm) * 10) / 10
+    : deliveryKm ?? pickupKm;
+  const payoutPerKm = totalKm != null && totalKm > 0
+    ? Math.round((payout / totalKm) * 100) / 100
+    : null;
+  const etaMinutes = totalKm != null ? Math.max(12, Math.round(10 + totalKm * 3)) : 20;
+
   return {
     orderId: row.id,
     restaurantName: row.restaurant_name,
@@ -189,9 +215,14 @@ function mapAvailableDeliveryRow(row: Record<string, unknown>, payout: number) {
     customerAddress: addrParts.join(', '),
     customerPhone: row.customer_phone,
     itemCount: Number(row.item_count ?? 0),
-    distanceKm: row.distance_km != null ? parseFloat(String(row.distance_km)) : null,
+    pickupKm,
+    deliveryKm,
+    totalKm,
+    distanceKm: deliveryKm,
     payout,
-    etaMinutes: 20,
+    payoutPerKm,
+    dealLabel: classifyDeal(payoutPerKm),
+    etaMinutes,
   };
 }
 
@@ -201,6 +232,7 @@ const AVAILABLE_DELIVERIES_SQL = `
          r.latitude AS restaurant_lat, r.longitude AS restaurant_lng,
          ua.street AS customer_street, ua.suburb AS customer_suburb,
          ua.city AS customer_city,
+         ua.latitude AS customer_lat, ua.longitude AS customer_lng,
          u.first_name AS customer_first_name, u.last_name AS customer_last_name,
          u.phone AS customer_phone,
          (SELECT COUNT(*) FROM order_items WHERE order_id=o.id) AS item_count
@@ -230,11 +262,17 @@ router.get('/deliveries/available', requireDriver, async (req: AuthRequest, res:
     }
 
     const limit = Math.min(Math.max(parseInt(String(req.query.limit ?? '5'), 10) || 5, 1), 10);
+    const driverLoc = await pool.query(
+      'SELECT location_lat, location_lng FROM drivers WHERE id=$1',
+      [req.userId],
+    );
+    const driverLat = parseCoord(driverLoc.rows[0]?.location_lat);
+    const driverLng = parseCoord(driverLoc.rows[0]?.location_lng);
     const result = await pool.query(AVAILABLE_DELIVERIES_SQL, [req.userId, limit]);
     const deliveries = await Promise.all(
       result.rows.map(async (row) => {
         const payout = await driverPayoutForFee(parseFloat(String(row.delivery_fee)));
-        return mapAvailableDeliveryRow(row, payout);
+        return mapAvailableDeliveryRow(row, payout, driverLat, driverLng);
       }),
     );
     ok(res, deliveries);
@@ -630,8 +668,13 @@ router.post('/wallet/withdraw', requireDriver, async (req: AuthRequest, res: Res
       return;
     }
 
-    const driverRes = await pool.query('SELECT wallet_balance FROM drivers WHERE id=$1', [req.userId]);
-    const balance = parseFloat(String(driverRes.rows[0]?.wallet_balance ?? '0'));
+    const driverRes = await pool.query(
+      `SELECT wallet_balance, bank_name, bank_account_no, bank_account_type, bank_holder_name
+       FROM drivers WHERE id=$1`,
+      [req.userId],
+    );
+    const driver = driverRes.rows[0];
+    const balance = parseFloat(String(driver?.wallet_balance ?? '0'));
 
     if (amount > balance) {
       fail(res, 400, 'INSUFFICIENT_FUNDS', `Insufficient balance. Available: R${balance.toFixed(2)}.`);
@@ -646,8 +689,9 @@ router.post('/wallet/withdraw', requireDriver, async (req: AuthRequest, res: Res
         [amount, req.userId]
       );
       await client.query(
-        `INSERT INTO withdrawal_requests (driver_id, amount, status) VALUES ($1,$2,'pending')`,
-        [req.userId, amount]
+        `INSERT INTO withdrawal_requests (driver_id, entity_type, amount, status, bank_name, bank_account_no, bank_account_type, bank_holder_name)
+         VALUES ($1,'driver',$2,'pending',$3,$4,$5,$6)`,
+        [req.userId, amount, driver?.bank_name ?? null, driver?.bank_account_no ?? null, driver?.bank_account_type ?? null, driver?.bank_holder_name ?? null],
       );
       await client.query(
         `INSERT INTO driver_transactions (driver_id, type, amount, description) VALUES ($1,'withdrawal',$2,'Bank withdrawal request')`,
