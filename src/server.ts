@@ -380,6 +380,10 @@ ALTER TABLE driver_applications ADD COLUMN IF NOT EXISTS vehicle_photo_url VARCH
 ALTER TABLE driver_applications ADD COLUMN IF NOT EXISTS license_plate_photo_url VARCHAR(500);
 
 -- Phase 17: order cancellation reason/fee tracking
+-- cancelled_at was missing here — POST /orders/:id/cancel's UPDATE sets it
+-- unconditionally, so every cancellation request 500'd with
+-- 'column "cancelled_at" of relation "orders" does not exist'.
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMPTZ;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS cancel_reason TEXT;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS cancellation_fee NUMERIC(10,2) NOT NULL DEFAULT 0;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS cancelled_by VARCHAR(20);
